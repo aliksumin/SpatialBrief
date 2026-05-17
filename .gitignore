@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.vscode/
+.idea/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Ignore user requested folders
+Materials/
+uploads/
+backend/uploads/
+scratch/

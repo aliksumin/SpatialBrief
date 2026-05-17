@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+python-multipart
+ezdxf
+google-genai
+openai
+PyMuPDF
+shapely
