@@ -154,69 +154,97 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
 
   const handleExport = async () => {
     try {
-      if ('showDirectoryPicker' in window) {
-        // Prompt user to select a directory and request write access
-        const dirHandle = await (window as any).showDirectoryPicker({
-          mode: 'readwrite'
-        });
-        
-        setIsProcessing(true);
-        
-        try {
-          // 1. Create the JSON configuration file
-          const jsonHandle = await dirHandle.getFileHandle('design_inputs.json', { create: true });
-          const jsonWritable = await jsonHandle.createWritable();
-          
-          const exportData = {
-            metadata: {
-              project: "Sector 7 Renewal",
-              generator: "OMRT Regulatory Engine",
-              timestamp: new Date().toISOString()
-            },
-            grasshopper_parameters: {
-              "Max_Height": 30,
-              "Setback_Front": 5,
-              "Programme_Uses": ["Residential", "Commercial"]
-            },
-            layers_to_import: [
-              "01_SITE_AND_PARCELS", 
-              "03_GENERATED_CONSTRAINTS", 
-              "04_PROGRAMME_AND_MASSING_PREVIEW"
-            ]
-          };
-          
-          await jsonWritable.write(JSON.stringify(exportData, null, 2));
-          await jsonWritable.close();
+      setIsProcessing(true);
 
-          // 2. Create the Rhino .3dm model file
-          const rhinoHandle = await dirHandle.getFileHandle('zoning_massing.3dm', { create: true });
-          const rhinoWritable = await rhinoHandle.createWritable();
-          // Generating a real 3dm binary requires backend serialization. For this prototype, we output a mock binary text.
-          await rhinoWritable.write("OMRT_RHINO_MOCK: In a full production build, this contains the compiled OpenNURBS binary data for layers, vectors, and breps.");
-          await rhinoWritable.close();
+      // Gather geometry data from the current project
+      const geometry = extractionData?.geometry?.raw_vector_objects || [];
+      const constraints = extractionData?.geometry?.constraints || [];
 
-          setTimeout(() => {
-            if(onNodeChange) onNodeChange(11);
-            if(onNodeChange) onNodeChange(11);
-            setIsProcessing(false);
-            alert(`Success! Both 'design_inputs.json' and 'zoning_massing.3dm' were saved to the '${dirHandle.name}' folder.`);
-          }, 1000);
-        } catch (writeErr) {
-          console.error('Failed to write file:', writeErr);
-          alert("Could not write file. Please ensure you granted 'Write' permissions to the folder.");
-          setIsProcessing(false);
-        }
-      } else {
-        alert("Your browser does not support native folder selection. Simulating export...");
-        setIsProcessing(true);
-        setTimeout(() => {
-          if(onNodeChange) onNodeChange(11);
-          if(onNodeChange) onNodeChange(11);
-          setIsProcessing(false);
-        }, 1000);
+      if (geometry.length === 0) {
+        alert('No geometry data to export. Please process files first.');
+        setIsProcessing(false);
+        return;
       }
-    } catch (err) {
-      console.log('Export cancelled or error:', err);
+
+      // 1. Export DXF via backend
+      const response = await fetch('http://localhost:8200/api/v1/export/rhino', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          geometry,
+          constraints,
+          project_name: 'SpatialBrief Export',
+          format: 'dxf',
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.statusText}`);
+      }
+
+      // Download the DXF file
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'zoning_massing.dxf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // 2. Also export design_inputs.json with real data
+      const constraintParams: Record<string, any> = {};
+      if (constraints.length > 0) {
+        for (const c of constraints) {
+          const key = (c.name || c.category || 'constraint').replace(/\s+/g, '_');
+          constraintParams[key] = { value: c.value, unit: c.unit, category: c.category };
+        }
+      }
+
+      const programmes = extractionData?.geometry?.programmes || [];
+      const exportData = {
+        metadata: {
+          project: 'SpatialBrief Export',
+          generator: 'OMRT Vector Engine',
+          timestamp: new Date().toISOString(),
+          total_objects: geometry.length,
+          total_constraints: constraints.length,
+          classification_mode: extractionData?.classification_mode || 'unknown',
+        },
+        constraints: constraintParams,
+        programmes: programmes.map((p: any) => ({
+          building_id: p.building_id,
+          building_label: p.building_label,
+          floors: p.floors,
+          floor_height: p.floor_height,
+          total_height: p.total_height,
+          uses: p.uses,
+        })),
+        layer_hierarchy: [
+          '00_Boundaries', '01_Zones', '02_Buildings',
+          '03_Constraints', '04_Generated_Volumes', '05_Infrastructure',
+        ],
+      };
+
+      const jsonBlob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const jsonUrl = URL.createObjectURL(jsonBlob);
+      const jsonA = document.createElement('a');
+      jsonA.href = jsonUrl;
+      jsonA.download = 'design_inputs.json';
+      document.body.appendChild(jsonA);
+      jsonA.click();
+      document.body.removeChild(jsonA);
+      URL.revokeObjectURL(jsonUrl);
+
+      if(onNodeChange) onNodeChange(11);
+      setIsProcessing(false);
+      alert(`Export complete!\n\nDownloaded:\n• zoning_massing.dxf — Layered geometry for Rhino\n• design_inputs.json — Constraints & programme data\n\nOpen the .dxf in Rhino to see all layers and metadata.`);
+
+    } catch (err: any) {
+      console.error('Export failed:', err);
+      alert(`Export failed: ${err?.message || 'Unknown error'}.\nCheck if the backend is running.`);
+      setIsProcessing(false);
     }
   };
 

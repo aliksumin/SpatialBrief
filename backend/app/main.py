@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import upload
+from .routers import upload, export
 
 app = FastAPI(title="OMRT Vector Engine API")
 
@@ -13,6 +13,7 @@ app.add_middleware(
 )
 
 app.include_router(upload.router, prefix="/api/v1")
+app.include_router(export.router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():

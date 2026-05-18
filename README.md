@@ -37,12 +37,13 @@ npm install
 ### Python Dependencies
 
 Key packages:
-- **google-genai** — Google Gemini API (unified SDK) for AI vision classification and constraint extraction
-- **PyMuPDF** — PDF rendering and vector extraction
-- **shapely** — Geometric analysis and spatial operations
-- **ezdxf** — DXF/CAD file parsing
-- **fastapi** + **uvicorn** — Backend API server
-- **pydantic** — Data validation and schemas
+- **google-genai** -- Google Gemini API (unified SDK) for AI vision classification and constraint extraction
+- **PyMuPDF** -- PDF rendering and vector extraction
+- **shapely** -- Geometric analysis and spatial operations
+- **ezdxf** -- DXF/CAD file parsing and export
+- **fastapi** + **uvicorn** -- Backend API server
+- **pydantic** -- Data validation and schemas
+- **rhino3dm** *(optional)* -- Native .3dm export (requires Python <= 3.13)
 
 ### Vector Conversion Dependency
 
@@ -91,7 +92,7 @@ chmod +x run.sh && ./run.sh
 cd backend
 venv\Scripts\activate        # Windows
 source venv/bin/activate     # macOS/Linux
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 ```
 
 **Frontend:**
@@ -120,7 +121,7 @@ SpatialBrief processes documents through an 11-node pipeline:
 | 8 | **Extract Programme** | GFA, uses, floor counts per building — AI fills gaps from regional defaults |
 | 9 | **Generate Volumes** | Floor-by-floor 3D massing with plinths and underground parking |
 | 10 | **Validation Report** | Summary and cross-validation of all pipeline outputs |
-| 11 | **Export Package** | Rhino / Grasshopper handoff |
+| 11 | **Export Package** | Rhino-compatible DXF/3DM export with layers, geometry, and metadata |
 
 ### Geometry Extraction Pipeline
 
@@ -148,6 +149,7 @@ This enables the system to understand architectural intent — e.g., recognising
 | `constraint_extractor` | Regex + AI extraction of regulatory constraints with setback geometry generation |
 | `programme_extractor` | Building programme extraction (GFA, uses, floors) with AI gap-fill |
 | `volume_generator` | Floor-by-floor 3D volume extrusion from footprints + programme |
+| `rhino_exporter` | Layered DXF/3DM export with metadata for Rhino/Grasshopper handoff |
 
 ### Project Structure
 
@@ -158,12 +160,14 @@ SpatialBrief/
 │   │   ├── main.py                    # FastAPI app entry point
 │   │   ├── config.py                  # Environment settings
 │   │   ├── routers/
-│   │   │   └── upload.py              # API endpoints (/upload, /process)
+│   │   │   ├── upload.py              # API endpoints (/upload, /process)
+│   │   │   └── export.py             # DXF/3DM export endpoint
 │   │   ├── ai_agents/                 # AI-powered analysis modules
 │   │   │   ├── ai_zone_validator.py
 │   │   │   ├── constraint_extractor.py
 │   │   │   ├── programme_extractor.py
-│   │   │   └── volume_generator.py
+│   │   │   ├── volume_generator.py
+│   │   │   └── rhino_exporter.py
 │   │   ├── vector_ingestion/          # Geometry extraction pipeline
 │   │   │   ├── pdf_vector_extractor.py
 │   │   │   ├── ai_vision_classifier.py
@@ -203,6 +207,7 @@ SpatialBrief/
 | Backend | FastAPI + Uvicorn (Python) |
 | AI | Google Gemini (vision + text) via `google-genai` SDK |
 | Geometry | Shapely + PyMuPDF + ezdxf |
+| Export | ezdxf (DXF) + rhino3dm (optional .3dm) |
 | Styling | Vanilla CSS with dark-mode design system |
 
 ## License
