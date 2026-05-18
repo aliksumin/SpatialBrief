@@ -7,10 +7,10 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Start Backend ──
-echo "Starting Backend API on http://localhost:8000 ..."
+echo "Starting Backend API on http://localhost:8200 ..."
 cd "$SCRIPT_DIR/backend"
 source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload &
 BACKEND_PID=$!
 deactivate 2>/dev/null
 
@@ -29,7 +29,7 @@ echo "============================================================"
 echo "  SpatialBrief is running!"
 echo ""
 echo "  Frontend:  http://localhost:5173"
-echo "  Backend:   http://localhost:8000"
+echo "  Backend:   http://localhost:8200"
 echo ""
 echo "  Press Ctrl+C to stop both servers."
 echo "============================================================"

@@ -53,7 +53,7 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
 
     try {
       // Node 1: upload-only endpoint — just saves files, no processing
-      const response = await fetch('http://localhost:8000/api/v1/upload', {
+      const response = await fetch('http://localhost:8200/api/v1/upload', {
         method: 'POST',
         body: formData,
       });
@@ -101,7 +101,7 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
 
       let response: Response;
       try {
-        response = await fetch('http://localhost:8000/api/v1/process', {
+        response = await fetch('http://localhost:8200/api/v1/process', {
           method: 'POST',
           headers,
           body: JSON.stringify({ filenames }),

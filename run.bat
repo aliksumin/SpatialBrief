@@ -5,9 +5,9 @@ echo ============================================================
 echo.
 
 :: ── Start Backend ──
-echo Starting Backend API on http://localhost:8000 ...
+echo Starting Backend API on http://localhost:8200 ...
 cd /d "%~dp0backend"
-start "SpatialBrief Backend" cmd /k "call venv\Scripts\activate.bat && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+start "SpatialBrief Backend" cmd /k "call venv\Scripts\activate.bat && uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload"
 
 :: Wait for backend to initialize
 timeout /t 3 /nobreak >nul
@@ -30,7 +30,7 @@ echo ============================================================
 echo   SpatialBrief is running!
 echo.
 echo   Frontend:  http://localhost:5173
-echo   Backend:   http://localhost:8000
+echo   Backend:   http://localhost:8200
 echo.
 echo   Close the terminal windows to stop the servers.
 echo ============================================================
