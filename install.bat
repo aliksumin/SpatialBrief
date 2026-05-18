@@ -1,6 +1,6 @@
 @echo off
 echo ============================================================
-echo   SpatialBrief — Installation
+echo   SpatialBrief - Installation
 echo ============================================================
 echo.
 
@@ -24,9 +24,9 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Node.js found
 
-:: ── Backend Setup ──
+:: -- Backend Setup --
 echo.
-echo ── Setting up Backend ──
+echo -- Setting up Backend --
 cd /d "%~dp0backend"
 
 if not exist "venv" (
@@ -44,9 +44,9 @@ if not exist "uploads" mkdir uploads
 
 echo [OK] Backend dependencies installed
 
-:: ── Frontend Setup ──
+:: -- Frontend Setup --
 echo.
-echo ── Setting up Frontend ──
+echo -- Setting up Frontend --
 cd /d "%~dp0frontend"
 
 echo Installing Node.js dependencies...
@@ -54,7 +54,7 @@ call npm install
 
 echo [OK] Frontend dependencies installed
 
-:: ── Done ──
+:: -- Done --
 echo.
 echo ============================================================
 echo   Installation complete!

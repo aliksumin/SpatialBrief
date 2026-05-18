@@ -1,10 +1,10 @@
 @echo off
 echo ============================================================
-echo   SpatialBrief — Starting Application
+echo   SpatialBrief - Starting Application
 echo ============================================================
 echo.
 
-:: ── Start Backend ──
+:: -- Start Backend --
 echo Starting Backend API on http://localhost:8200 ...
 cd /d "%~dp0backend"
 start "SpatialBrief Backend" cmd /k "call venv\Scripts\activate.bat && uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload"
@@ -12,7 +12,7 @@ start "SpatialBrief Backend" cmd /k "call venv\Scripts\activate.bat && uvicorn a
 :: Wait for backend to initialize
 timeout /t 3 /nobreak >nul
 
-:: ── Start Frontend ──
+:: -- Start Frontend --
 echo Starting Frontend on http://localhost:5173 ...
 cd /d "%~dp0frontend"
 start "SpatialBrief Frontend" cmd /k "npm run dev"
@@ -20,7 +20,7 @@ start "SpatialBrief Frontend" cmd /k "npm run dev"
 :: Wait for frontend to initialize
 timeout /t 3 /nobreak >nul
 
-:: ── Open browser ──
+:: -- Open browser --
 echo.
 echo Opening browser...
 start http://localhost:5173
