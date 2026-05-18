@@ -2,8 +2,18 @@ import React, { useState } from 'react';
 import { Save, Zap, CheckCircle, XCircle, Loader } from 'lucide-react';
 
 export const ApiSettingsPanel: React.FC = () => {
+  // Migrate stale model names that don't exist in the API
+  const storedGoogleModel = localStorage.getItem('googleModel');
+  if (storedGoogleModel && ['gemini-3.1-pro', 'gemini-3.1-flash'].includes(storedGoogleModel)) {
+    localStorage.setItem('googleModel', 'gemini-2.5-flash');
+  }
+  const storedOpenaiModel = localStorage.getItem('openaiModel');
+  if (storedOpenaiModel && ['gpt-5.5-instant'].includes(storedOpenaiModel)) {
+    localStorage.setItem('openaiModel', 'gpt-5.5');
+  }
+
   const [provider, setProvider] = useState(localStorage.getItem('apiProvider') || 'google');
-  const [googleModel, setGoogleModel] = useState(localStorage.getItem('googleModel') || 'gemini-3.1-pro');
+  const [googleModel, setGoogleModel] = useState(localStorage.getItem('googleModel') || 'gemini-2.5-flash');
   const [openaiModel, setOpenaiModel] = useState(localStorage.getItem('openaiModel') || 'gpt-5.5');
   
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('geminiKey') || '');
@@ -55,17 +65,17 @@ export const ApiSettingsPanel: React.FC = () => {
   };
 
   const googleModels = [
-    { value: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro' },
-    { value: 'gemini-3.1-flash', label: 'Gemini 3.1 Flash' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Recommended)' },
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (Preview)' },
+    { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
   ];
 
   const openaiModels = [
+    { value: 'gpt-5.5', label: 'GPT-5.5 (Recommended)' },
     { value: 'gpt-5.5-pro', label: 'GPT-5.5 Pro' },
-    { value: 'gpt-5.5', label: 'GPT-5.5' },
-    { value: 'gpt-5.5-instant', label: 'GPT-5.5 Instant' },
     { value: 'gpt-5.4', label: 'GPT-5.4' },
+    { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
   ];
 
   const selectStyle = {

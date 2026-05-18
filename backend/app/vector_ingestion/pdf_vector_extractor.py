@@ -359,8 +359,31 @@ def _assemble_polygons(paths, page_area, min_frac=0.00003):
     for p in paths:
         pts = p["points"]
         if len(pts) < 3: continue
-        # Decrease closed threshold to 2.0 to avoid treating open hatching lines as closed polygons
-        closed = math.dist(pts[0], pts[-1]) < 2.0
+        # Check for closed or near-closed polycurves.
+        # Buildings are often drawn as polycurves with a small gap at the
+        # closure point — treat anything with gap < 5.0 PDF units as closed.
+        gap = math.dist(pts[0], pts[-1])
+        closed = gap < 5.0
+
+        # Second chance: promote near-closed polylines (gap < 15 PDF units)
+        # to closed if they have building-like shape (compact, rectangular).
+        if not closed and gap < 15.0 and len(pts) >= 4:
+            # Temporarily close and check shape metrics
+            trial_ring = list(pts) + [pts[0]]
+            try:
+                trial_poly = Polygon(trial_ring)
+                if not trial_poly.is_valid:
+                    trial_poly = make_valid(trial_poly)
+                if isinstance(trial_poly, MultiPolygon):
+                    trial_poly = max(trial_poly.geoms, key=lambda g: g.area)
+                if isinstance(trial_poly, Polygon) and trial_poly.area >= min_area:
+                    metrics = _compute_shape_metrics(trial_poly)
+                    if _is_building_shape(metrics):
+                        closed = True
+                        log.debug("Promoted near-closed polycurve (gap=%.1f) to closed polygon (building shape)", gap)
+            except Exception:
+                pass
+
         if closed and len(pts) >= 4:
             ring = list(pts)
             if ring[0] != ring[-1]: ring.append(ring[0])
@@ -574,13 +597,15 @@ def _compute_shape_metrics(poly):
 def _is_building_shape(metrics: dict) -> bool:
     """Does this polygon look like a building footprint?
     Buildings are roughly rectangular, compact, not extremely elongated.
+    Relaxed thresholds to catch small auxiliary structures (sheds, carports)
+    and irregular L/T/U-shaped footprints.
     """
     return (
-        metrics["aspect_ratio"] < 5.0 and
-        metrics["compactness"] > 0.45 and
-        metrics["elongation"] < 0.80 and
-        metrics["circularity"] > 0.10 and
-        metrics["min_dim"] > 3.0
+        metrics["aspect_ratio"] < 6.0 and
+        metrics["compactness"] > 0.35 and
+        metrics["elongation"] < 0.85 and
+        metrics["circularity"] > 0.08 and
+        metrics["min_dim"] > 2.0
     )
 
 
@@ -693,10 +718,15 @@ def _classify_zones(polygons, page_area):
 
             elif inside_plot and metrics and _is_building_shape(metrics):
                 # Building-shaped, inside plot → building (sub_zone)
-                # BUT protect large polygons — they are zones, not buildings
+                # BUT protect very large polygons — they are zones, not buildings
                 plot_area = plot_poly.area if plot_poly else page_area
                 area_ratio_of_plot = p["area"] / plot_area if plot_area > 0 else 0
-                if area_ratio_of_plot > 0.05:
+                # Extraction strategy override: chain_join/planar_face are
+                # almost certainly buildings regardless of size
+                strategy = p.get("_extraction_strategy", "direct")
+                if strategy in ("chain_join", "planar_face"):
+                    zt, conf, meth = "sub_zone", 0.80, f"building_shape+{strategy}"
+                elif area_ratio_of_plot > 0.10:
                     # Too large to be a building — classify as zone
                     zt, conf, meth = "uncategorized_zone", 0.70, "large_unfilled_inside_plot"
                 else:
@@ -710,7 +740,10 @@ def _classify_zones(polygons, page_area):
                 if metrics and _is_building_shape(metrics):
                     plot_area = plot_poly.area if plot_poly else page_area
                     area_ratio_of_plot = p["area"] / plot_area if plot_area > 0 else 0
-                    if area_ratio_of_plot > 0.05:
+                    strategy = p.get("_extraction_strategy", "direct")
+                    if strategy in ("chain_join", "planar_face"):
+                        zt, conf, meth = "sub_zone", 0.80, f"medium_stroke+{strategy}"
+                    elif area_ratio_of_plot > 0.10:
                         zt, conf, meth = "uncategorized_zone", 0.65, "large_unfilled_medium_stroke"
                     else:
                         zt, conf, meth = "sub_zone", 0.70, "medium_stroke+building_shape"
@@ -801,8 +834,8 @@ def _resolve_zone_building_overlap(zones):
         if z["zone_type"] in ("plot_boundary", "minor_context"):
             continue
 
-        # Size guard: never demote large polygons (>5% of plot) to sub_zone
-        if z["area"] > plot_area * 0.05:
+        # Size guard: never demote large polygons (>10% of plot) to sub_zone
+        if z["area"] > plot_area * 0.10:
             continue
 
         z_poly = z["shapely_poly"]
@@ -1014,7 +1047,7 @@ def _fill_plot_gaps(zones, page_area):
     elif gap_geometry.geom_type == 'GeometryCollection':
         gap_polys = [g for g in gap_geometry.geoms if g.geom_type == 'Polygon']
 
-    min_gap_area = plot_area * 0.005  # Ignore tiny slivers (< 0.5% of plot)
+    min_gap_area = plot_area * 0.0001  # Ignore tiny slivers (< 0.01% of plot)
     meaningful_gaps = [g for g in gap_polys if g.area > min_gap_area]
 
     if not meaningful_gaps:

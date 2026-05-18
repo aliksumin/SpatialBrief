@@ -8,8 +8,17 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Ignore user requested folders
+# Ignore user data folders
 Materials/
 uploads/
 backend/uploads/
+
+# Scratch / debug scripts
 scratch/
+
+# Backend test scripts (one-off debug, not CI tests)
+backend/tests/
+
+# Temp files
+~$*
+*.tmp

@@ -12,6 +12,7 @@ def validate_zones_with_ai(
     zones: List[Dict[str, Any]],
     text_blocks: List[Dict[str, Any]],
     api_key: Optional[str] = None,
+    model_name: str = "gemini-2.5-flash",
 ) -> List[Dict[str, Any]]:
     """
     Optionally validate zone classifications using Gemini AI.
@@ -25,20 +26,23 @@ def validate_zones_with_ai(
     
     try:
         from google import genai
+        from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=60_000),
+        )
         
         # Prepare a compact summary for the AI
         zone_summaries = []
         for z in zones[:30]:  # Limit to avoid token overflow
             zone_summaries.append({
-                "id": z["id"],
-                "type": z["type"],
-                "zone_type": z["zone_type"],
-                "area": z.get("area_pdf_units", 0),
-                "color": z.get("color_hint", ""),
-                "filled": z.get("filled", False),
-                "stroke_width": z.get("stroke_width", 0),
+                "id": z.get("id", ""),
+                "zone_type": z.get("zone_type", "unknown"),
+                "area": z.get("area", 0),
+                "color": z.get("color_hex", ""),
+                "filled": z.get("fill") is not None,
+                "stroke_width": z.get("width", 0),
                 "confidence": z.get("confidence", 0),
                 "method": z.get("classification_method", ""),
             })
@@ -65,8 +69,11 @@ If all classifications look correct, return an empty array: []
 """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model_name,
             contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
         )
         text = response.text.strip()
         

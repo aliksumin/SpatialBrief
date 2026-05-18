@@ -1,11 +1,14 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from typing import List
+import asyncio
 import shutil
 import os
 
 from app.vector_ingestion.pdf_vector_extractor import extract_vectors_from_pdf
 from app.vector_ingestion.cad_extractor import extract_from_dwg
-from app.ai_agents.ai_zone_validator import validate_zones_with_ai
+from app.ai_agents.constraint_extractor import extract_constraints
+from app.ai_agents.programme_extractor import extract_programme
+from app.ai_agents.volume_generator import generate_volumes
 from app.config import settings
 
 router = APIRouter()
@@ -86,16 +89,77 @@ async def run_pipeline(request: Request):
                     zone_summary[zt] = zone_summary.get(zt, 0) + count
             classification_mode = "rule_based"
 
-    # Optional AI text-based validation pass
-    if api_key and extracted_geometry:
-        extracted_geometry = validate_zones_with_ai(
-            extracted_geometry, extracted_text_blocks, api_key
-        )
+    # Run constraint + programme extraction in parallel to save time.
+    # Both are independent — they only need zones + text which are ready.
+    resolved_model = gemini_model or "gemini-2.5-flash"
+    loop = asyncio.get_event_loop()
+
+    constraint_future = loop.run_in_executor(
+        None,
+        lambda: extract_constraints(
+            text_blocks=extracted_text_blocks,
+            zones=extracted_geometry,
+            api_key=api_key,
+            model_name=resolved_model,
+        ),
+    )
+    programme_future = loop.run_in_executor(
+        None,
+        lambda: extract_programme(
+            text_blocks=extracted_text_blocks,
+            zones=extracted_geometry,
+            constraints=[],  # regex constraints available inside extractor
+            api_key=api_key,
+            model_name=resolved_model,
+        ),
+    )
+
+    constraint_result, programme_result = await asyncio.gather(
+        constraint_future, programme_future
+    )
+
+    # Merge constraint geometry into the main geometry list
+    constraint_geometry = constraint_result.get("constraint_geometry", [])
+    for cg in constraint_geometry:
+        # Ensure they have the fields the frontend expects
+        cg.setdefault("area_pdf_units", 0)
+        cg.setdefault("centroid", [0, 0, 0])
+        cg.setdefault("filled", False)
+        cg.setdefault("source_layer", "constraints")
+    extracted_geometry.extend(constraint_geometry)
+    total_objects += len(constraint_geometry)
+
+    # Volume generation — floor-by-floor extrusion from footprints + programme
+    volume_result = generate_volumes(
+        zones=extracted_geometry,
+        programmes=programme_result.get("programmes", []),
+        constraints=constraint_result.get("constraints", []),
+    )
+
+    # Add volume geometry to the main geometry list
+    volume_geometry = volume_result.get("volumes", [])
+    extracted_geometry.extend(volume_geometry)
+    total_objects += len(volume_geometry)
+
+    # Track which AI models were used for each task
+    ai_models = {}
+    if api_key:
+        if classification_mode == "ai_vision":
+            ai_models["vision_classification"] = resolved_model
+        if constraint_result.get("extraction_summary", {}).get("ai_extracted", 0) > 0 or \
+           constraint_result.get("extraction_summary", {}).get("ai_suggested", 0) > 0:
+            ai_models["constraint_extraction"] = resolved_model
+        if programme_result.get("extraction_summary", {}).get("ai_extracted", 0) > 0 or \
+           programme_result.get("extraction_summary", {}).get("ai_suggested", 0) > 0:
+            ai_models["programme_extraction"] = resolved_model
+        if extracted_geometry:
+            ai_models["zone_validation"] = resolved_model
 
     response = {
         "status": "success",
         "filenames": filenames,
         "classification_mode": classification_mode,
+        "ai_models": ai_models,
         "geometry": {
             "source_files": filenames,
             "extracted_objects": total_objects,
@@ -103,7 +167,15 @@ async def run_pipeline(request: Request):
             "extracted_text": extracted_text_blocks,
             "zone_summary": zone_summary,
             "classification_mode": classification_mode,
-            "semantic_objects_2d": []
+            "ai_models": ai_models,
+            "semantic_objects_2d": [],
+            "constraints": constraint_result.get("constraints", []),
+            "constraint_summary": constraint_result.get("extraction_summary", {}),
+            "programmes": programme_result.get("programmes", []),
+            "site_programme": programme_result.get("site_programme", {}),
+            "programme_summary": programme_result.get("extraction_summary", {}),
+            "volumes": volume_result.get("volumes", []),
+            "volume_summary": volume_result.get("volume_summary", {}),
         }
     }
     if ai_error_detail:

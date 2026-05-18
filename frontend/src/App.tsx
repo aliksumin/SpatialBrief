@@ -16,14 +16,19 @@ export default function App() {
     }
   });
   
+  const MAX_NODE = 11;
+  
   const [activeNode, setActiveNode] = useState<number>(() => {
     const saved = localStorage.getItem('omrt_activeNode');
-    return saved ? parseInt(saved, 10) : 1;
+    const val = saved ? parseInt(saved, 10) : 1;
+    return val > MAX_NODE ? MAX_NODE : val;
   });
   
   const [selectedNode, setSelectedNode] = useState<number | null>(() => {
     const saved = localStorage.getItem('omrt_selectedNode');
-    return saved && saved !== 'null' ? parseInt(saved, 10) : null;
+    if (!saved || saved === 'null') return null;
+    const val = parseInt(saved, 10);
+    return val > MAX_NODE ? MAX_NODE : val;
   });
   const [selectedVector, setSelectedVector] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<string>('Data');
@@ -236,8 +241,8 @@ export default function App() {
           </div>
         )}
 
-        {/* Node 6 to 9: Clean Vector Geometry */}
-        {selectedNode >= 6 && selectedNode < 10 && (
+        {/* Node 6: Vector Geometry */}
+        {selectedNode === 6 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
               <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>PIPELINE</span> 
@@ -337,8 +342,89 @@ export default function App() {
           </div>
         )}
 
-        {/* Node 10 to 14: Rules & Linking (Using Extracted Text) */}
-        {selectedNode >= 10 && selectedNode < 15 && (
+        {/* Node 7: Extract Constraints */}
+        {selectedNode === 7 && (
+          <div className="data-card" style={{ gridColumn: '1 / -1' }}>
+            <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
+              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>CONSTRAINTS</span>
+              Regulatory Constraints
+            </div>
+            {(() => {
+              const constraints = data.constraints || [];
+              const summary = data.constraint_summary || {};
+              if (constraints.length === 0) {
+                return (
+                  <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                    No constraints extracted. Upload regulatory documents with constraint data.
+                  </div>
+                );
+              }
+              const catColors: Record<string, string> = {
+                height: '#3b82f6', setback: '#22c55e', density: '#f59e0b',
+                parking: '#f97316', programme: '#8b5cf6', environmental: '#06b6d4',
+                facade: '#ec4899', access: '#64748b', other: '#94a3b8',
+              };
+              return (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+                    <div>
+                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#22c55e' }}>{summary.total || constraints.length}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Total Constraints</div>
+                    </div>
+                    <div>
+                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#3b82f6' }}>{summary.regex_extracted || 0}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Pattern Extracted</div>
+                    </div>
+                    <div>
+                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#8b5cf6' }}>{summary.ai_extracted || 0}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>AI Extracted</div>
+                    </div>
+                    <div>
+                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#f59e0b' }}>{summary.ai_suggested || 0}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>AI Suggested</div>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '1rem', maxHeight: '280px', overflowY: 'auto' }}>
+                    <h4 style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>Constraint Details</h4>
+                    <div style={{ display: 'grid', gap: '0.5rem' }}>
+                      {constraints.map((c: any, i: number) => (
+                        <div key={i} style={{
+                          display: 'flex', alignItems: 'center', gap: '0.75rem',
+                          background: 'rgba(0,0,0,0.2)', padding: '0.7rem 1rem',
+                          borderRadius: '8px', borderLeft: `3px solid ${catColors[c.category] || '#666'}`,
+                        }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              {c.name}
+                              {c.source === 'ai_suggested' && (
+                                <span style={{ fontSize: '0.6rem', background: 'rgba(245,158,11,0.2)', color: '#fbbf24', padding: '0.1rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(245,158,11,0.3)' }}>AI Suggested</span>
+                              )}
+                              {c.source === 'ai_extracted' && (
+                                <span style={{ fontSize: '0.6rem', background: 'rgba(139,92,246,0.2)', color: '#a78bfa', padding: '0.1rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(139,92,246,0.3)' }}>AI Extracted</span>
+                              )}
+                            </div>
+                            {c.raw_quote && (
+                              <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.25rem', fontStyle: 'italic' }}>"{c.raw_quote}"</div>
+                            )}
+                          </div>
+                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: catColors[c.category] || '#999' }}>{c.value} <span style={{ fontSize: '0.75rem', fontWeight: 400 }}>{c.unit}</span></div>
+                            <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                              <span style={{ color: (c.confidence || 0) >= 0.7 ? '#22c55e' : '#f59e0b' }}>{Math.round((c.confidence || 0) * 100)}%</span> · {c.category}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* Node 8: Extract Programme (Using Extracted Text) */}
+        {selectedNode === 8 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
               <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>INPUT: Document Text</span> 
@@ -362,8 +448,8 @@ export default function App() {
           </div>
         )}
         
-        {/* Node 15+: Volumes & Generation - Clear out old hardcoded stats */}
-        {selectedNode >= 15 && (
+        {/* Node 9+: Volumes, Validation & Export */}
+        {selectedNode >= 9 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
              <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>Spatial Generation & Validation</div>
              <div style={{ marginTop: '1rem', color: 'var(--text-secondary)' }}>Waiting for full 3D generation algorithms based on extracted vectors...</div>
@@ -380,24 +466,15 @@ export default function App() {
     const srcMap: Record<number, string> = {
       1: `Input bundle: ${fileList}`,
       2: `Classifying: ${fileList}`,
-      3: `Text extraction from: ${fileList}`,
+      3: `Text extraction & annotations from: ${fileList}`,
       4: `Coordinate detection from CAD headers`,
       5: `Spatial analysis of closed polygons from vector data`,
-      6: `Vector geometry from: ${fileList}`,
-      7: `Annotation layers parsed from source drawings`,
-      8: `Reconstructed from open/broken polylines in vector data`,
-      9: `Cross-referencing all extracted entities`,
-      10: `Regulatory text parsed from document pages`,
-      11: `Programme data (GFA, uses) from regulatory documents`,
-      12: `Constraint values (setbacks, heights) from documents`,
-      13: `Linking text rules → polygon geometry`,
-      14: `Gap-filling from standards and context`,
-      15: `Parametric model built from linked data`,
-      16: `3D volumes generated from constraints + geometry`,
-      17: `Conflict detection across all linked rules`,
-      18: `UI scene assembly from all pipeline outputs`,
-      19: `Validation report across all pipeline stages`,
-      20: `Export package: Rhino/Grasshopper handoff`,
+      6: `Vector geometry extraction & reconstruction from: ${fileList}`,
+      7: `Constraint extraction (regex + AI) from document text`,
+      8: `Programme data (GFA, uses) from regulatory documents`,
+      9: `3D volumes generated from footprints + programme + constraints`,
+      10: `Validation report across all pipeline stages`,
+      11: `Export package: Rhino/Grasshopper handoff`,
     };
     return srcMap[selectedNode] || `Source: ${fileList}`;
   };
@@ -407,24 +484,15 @@ export default function App() {
     const conflictMap: Record<number, string> = {
       1: 'No issues — files loaded successfully.',
       2: 'No classification conflicts detected.',
-      3: 'No metadata extraction issues.',
+      3: 'No metadata or annotation extraction issues.',
       4: 'Verify that detected units match the drawing intent.',
       5: 'Check that all zones are properly separated.',
-      6: 'Review zone classification accuracy in the viewport.',
-      7: 'Verify annotation placement and label correctness.',
-      8: 'Check for unclosed polylines or topology gaps.',
-      9: 'No indexing issues detected.',
-      10: 'Verify extracted rules match the regulatory documents.',
-      11: 'Confirm GFA and use allocations are correct.',
-      12: 'Review setback and height constraint values.',
-      13: 'Verify rule-to-geometry links are accurate.',
-      14: 'Parking standard inferred from defaults — please verify.',
-      15: 'Review parametric model parameters before generation.',
-      16: 'Check generated volumes against site constraints.',
-      17: 'Minor setback overlap detected at coordinates [12, -12].\nParking standard inferred. Please verify.',
-      18: 'No scene assembly issues.',
-      19: 'Review full validation report before export.',
-      20: 'Verify export package completeness.',
+      6: 'Review zone classification and geometry reconstruction accuracy in the viewport.',
+      7: 'Review extracted constraint values against source documents.',
+      8: 'Confirm GFA and use allocations are correct.',
+      9: 'Check generated volumes against site constraints.',
+      10: 'Review full validation report before export.',
+      11: 'Verify export package completeness.',
     };
     return conflictMap[selectedNode] || 'No issues detected for this node.';
   };
@@ -586,12 +654,43 @@ export default function App() {
             <span style={{ opacity: 0.5 }}>Ready — Upload documents to begin analysis</span>
           )}
         </div>
-        <div className="status-bar-section">
-          <span style={{ opacity: 0.5 }}>
-            {uploadedBundle?.geometry?.extracted_objects 
-              ? `${uploadedBundle.geometry.extracted_objects} objects extracted`
-              : 'OMRT Engine'}
-          </span>
+        <div className="status-bar-section" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {(() => {
+            const aiModels = uploadedBundle?.geometry?.ai_models || uploadedBundle?.ai_models || {};
+            const taskLabels: Record<string, { label: string; color: string }> = {
+              vision_classification: { label: 'Vision', color: '#34d399' },
+              constraint_extraction: { label: 'Constraints', color: '#a78bfa' },
+              zone_validation: { label: 'Validation', color: '#60a5fa' },
+            };
+            const entries = Object.entries(aiModels);
+            if (entries.length > 0) {
+              return entries.map(([task, model]) => {
+                const cfg = taskLabels[task] || { label: task, color: '#94a3b8' };
+                return (
+                  <span key={task} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                    fontSize: '0.7rem', padding: '0.15rem 0.5rem',
+                    borderRadius: '4px', 
+                    background: `${cfg.color}12`, 
+                    border: `1px solid ${cfg.color}30`,
+                    color: cfg.color,
+                  }}>
+                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+                    {cfg.label}: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{String(model)}</span>
+                  </span>
+                );
+              });
+            }
+            // No AI models used — show configured model or engine label
+            const configuredModel = localStorage.getItem('googleModel');
+            return (
+              <span style={{ opacity: 0.5, fontSize: '0.75rem' }}>
+                {uploadedBundle?.geometry?.extracted_objects 
+                  ? `${uploadedBundle.geometry.extracted_objects} objects extracted`
+                  : configuredModel ? `Model: ${configuredModel}` : 'OMRT Engine'}
+              </span>
+            );
+          })()}
         </div>
       </div>
     </div>

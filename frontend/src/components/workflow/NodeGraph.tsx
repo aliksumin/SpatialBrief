@@ -14,24 +14,15 @@ interface NodeGraphProps {
 const NODES = [
   { id: 1, title: 'Load Input Bundle', desc: 'Upload documents and CAD vectors', metrics: { files: 2 } },
   { id: 2, title: 'Classify Documents', desc: 'Determine file roles via AI', metrics: { roles: 2, conf: '98%' } },
-  { id: 3, title: 'Extract Metadata', desc: 'Parse text and tables', metrics: { entities: 15 } },
+  { id: 3, title: 'Extract Metadata', desc: 'Parse text, tables and annotations', metrics: { entities: 15, labels: 42 } },
   { id: 4, title: 'Detect Units & Coordinates', desc: 'Detect drawing scale and origin point', metrics: { unit: 'meters', crs: 'Local' } },
   { id: 5, title: 'Separate Drawing Areas', desc: 'Analyse plot, envelopes, and no-build zones', metrics: { zones_identified: 3 } },
-  { id: 6, title: 'Extract Vector Geometry', desc: 'Provide clean, colored zone graphics', metrics: { polygons: 3, layers: 3 } },
-  { id: 7, title: 'Parse Annotations', desc: 'Extract layers and dimensions', metrics: { labels: 42 } },
-  { id: 8, title: 'Reconstruct Geometry', desc: 'Close polylines, fix gaps', metrics: { polygons: 3, open: 0 } },
-  { id: 9, title: 'Build Source Index', desc: 'Index all references', metrics: { index: 120 } },
-  { id: 10, title: 'Extract Regulatory Rules', desc: 'Semantic rule parsing', metrics: { rules: 8, conf: '92%' } },
-  { id: 11, title: 'Extract Programme', desc: 'GFA, uses, parking', metrics: { uses: 2, gfa: '13.5k' } },
-  { id: 12, title: 'Extract Constraints', desc: 'Setbacks, heights', metrics: { constraints: 5 } },
-  { id: 13, title: 'Link Rules to Geometry', desc: 'Map text to polygons', metrics: { links: 6 } },
-  { id: 14, title: 'Infer Missing Variables', desc: 'Fill gaps cautiously', metrics: { inferred: 2 }, warning: 'Parking inferred from default standard' },
-  { id: 15, title: 'Generate Parametric Model', desc: 'Setup Rhino/GH logics', metrics: { params: 12 } },
-  { id: 16, title: 'Generate Volumes', desc: 'Spatialise into 3D', metrics: { blocks: 3 } },
-  { id: 17, title: 'Detect Conflicts', desc: 'Validation checks', metrics: { conflicts: 1 }, error: 'Minor setback overlap detected' },
-  { id: 18, title: 'Build UI Scene', desc: 'Prepare visualizers', metrics: { layers: 5 } },
-  { id: 19, title: 'Validation Report', desc: 'Summary of process', metrics: {} },
-  { id: 20, title: 'Export Package', desc: 'Rhino / Grasshopper handoff', metrics: {} }
+  { id: 6, title: 'Extract Vector Geometry', desc: 'Reconstruct, close polylines and extract clean zones', metrics: { polygons: 3, open: 0, layers: 3 } },
+  { id: 7, title: 'Extract Constraints', desc: 'AI-powered setback, height & rule extraction', metrics: { constraints: 0, ai_sourced: 0 } },
+  { id: 8, title: 'Extract Programme', desc: 'GFA, uses, floors per building — AI fills gaps', metrics: { buildings: 0, uses: 0 } },
+  { id: 9, title: 'Generate Volumes', desc: '3D floor-by-floor volumes, plinths & parking', metrics: { volumes: 0, floors: 0 } },
+  { id: 10, title: 'Validation Report', desc: 'Summary of process', metrics: {} },
+  { id: 11, title: 'Export Package', desc: 'Rhino / Grasshopper handoff', metrics: {} }
 ];
 
 export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeChange, selectedNode, onSelectNode, activeNode, fileCount, extractionData }) => {
@@ -102,11 +93,29 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       const geminiModel = localStorage.getItem('googleModel')?.trim();
       if (geminiModel) headers['X-Gemini-Model'] = geminiModel;
 
-      const response = await fetch('http://localhost:8000/api/v1/process', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ filenames }),
-      });
+      // Use AbortController with 300s timeout — the backend runs multiple
+      // sequential AI calls (vision + constraints + programme)
+      // which can take 60-150s total with powerful models.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 300_000);
+
+      let response: Response;
+      try {
+        response = await fetch('http://localhost:8000/api/v1/process', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ filenames }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`Server error ${response.status}: ${errText.slice(0, 200)}`);
+      }
+
       const result = await response.json();
 
       // Pipeline data received — step through nodes showing progressive results
@@ -122,26 +131,22 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       if(onNodeChange) onNodeChange(5);
       await new Promise(r => setTimeout(r, 400));
 
-      // Node 6: Extract Vector Geometry + Reconstruct
+      // Node 6: Extract Vector Geometry (includes reconstruction)
       if(onNodeChange) onNodeChange(6);
       await new Promise(r => setTimeout(r, 500));
 
-      // Node 7: Parse Annotations (already done in step 3)
-      if(onNodeChange) onNodeChange(7);
-      await new Promise(r => setTimeout(r, 300));
-
-      // Node 8: Reconstruct Geometry (already done in step 6)
-      if(onNodeChange) onNodeChange(8);
-      await new Promise(r => setTimeout(r, 300));
-
-      // Nodes 9-20: step through remaining nodes
-      for (let i = 9; i <= 20; i++) {
+      // Nodes 7-11: step through remaining nodes
+      for (let i = 7; i <= 11; i++) {
         if(onNodeChange) onNodeChange(i);
         await new Promise(r => setTimeout(r, 400));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Pipeline processing failed:', error);
-      alert('Processing failed. Check if the backend is running.');
+      if (error?.name === 'AbortError') {
+        alert('Processing timed out (300s). The AI analysis may be taking too long.\n\nTry:\n• Processing without an API key (rule-based mode)\n• Uploading a smaller document');
+      } else {
+        alert(`Processing failed: ${error?.message || 'Unknown error'}.\nCheck if the backend is running.`);
+      }
     }
 
     setIsProcessing(false);
@@ -191,8 +196,8 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
           await rhinoWritable.close();
 
           setTimeout(() => {
-            if(onNodeChange) onNodeChange(21);
-            if(onNodeChange) onNodeChange(21);
+            if(onNodeChange) onNodeChange(11);
+            if(onNodeChange) onNodeChange(11);
             setIsProcessing(false);
             alert(`Success! Both 'design_inputs.json' and 'zoning_massing.3dm' were saved to the '${dirHandle.name}' folder.`);
           }, 1000);
@@ -205,8 +210,8 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
         alert("Your browser does not support native folder selection. Simulating export...");
         setIsProcessing(true);
         setTimeout(() => {
-          if(onNodeChange) onNodeChange(21);
-          if(onNodeChange) onNodeChange(21);
+          if(onNodeChange) onNodeChange(11);
+          if(onNodeChange) onNodeChange(11);
           setIsProcessing(false);
         }, 1000);
       }
@@ -275,7 +280,10 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                       const geo = extractionData.geometry || extractionData;
                       const vecs = geo?.raw_vector_objects || [];
                       const texts = geo?.extracted_text || [];
+                      const csts = geo?.constraints || [];
+                      if (node.id === 3 && k === 'labels') displayValue = String(texts.length);
                       if (node.id === 6 && k === 'polygons') displayValue = String(vecs.filter((v: any) => v.closed).length);
+                      if (node.id === 6 && k === 'open') displayValue = String(vecs.filter((v: any) => !v.closed).length);
                       if (node.id === 6 && k === 'layers') {
                         const types = new Set(vecs.map((v: any) => v.zone_type));
                         displayValue = String(types.size);
@@ -284,9 +292,19 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                         const types = new Set(vecs.map((v: any) => v.zone_type));
                         displayValue = String(types.size);
                       }
-                      if (node.id === 7 && k === 'labels') displayValue = String(texts.length);
-                      if (node.id === 8 && k === 'polygons') displayValue = String(vecs.filter((v: any) => v.closed).length);
-                      if (node.id === 8 && k === 'open') displayValue = String(vecs.filter((v: any) => !v.closed).length);
+                      if (node.id === 7 && k === 'constraints') displayValue = String(csts.length);
+                      if (node.id === 7 && k === 'ai_sourced') displayValue = String(csts.filter((c: any) => c.source === 'ai_extracted' || c.source === 'ai_suggested').length);
+                      const progs = geo?.programmes || [];
+                      const vols = geo?.volumes || [];
+                      if (node.id === 8 && k === 'buildings') displayValue = String(progs.length);
+                      if (node.id === 8 && k === 'uses') {
+                        const allUses = new Set(progs.flatMap((p: any) => (p.uses || []).map((u: any) => u.use)));
+                        displayValue = String(allUses.size);
+                      }
+                      if (node.id === 9 && k === 'volumes') displayValue = String(vols.length);
+                      if (node.id === 9 && k === 'floors') {
+                        displayValue = String(vols.filter((v: any) => v.zone_type === 'building_floor').length);
+                      }
                     }
                     return (
                       <div key={k} style={{ background: 'rgba(255,255,255,0.03)', padding: '0.15rem 0.4rem', borderRadius: '4px', fontSize: '0.65rem', color: 'var(--text-secondary)', border: '1px solid rgba(255,255,255,0.04)' }}>
@@ -352,8 +370,9 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                 </button>
               )}
 
-              {/* Node 20 Manual Export */}
-              {node.id === 20 && isActive && !isProcessing && (
+
+              {/* Node 11 Manual Export */}
+              {node.id === 11 && isActive && !isProcessing && (
                 <button className="btn" onClick={handleExport} style={{ marginTop: '1rem', width: '100%', background: '#10b981' }}>
                   <Download size={16} /> Export Rhino/GH Package
                 </button>
