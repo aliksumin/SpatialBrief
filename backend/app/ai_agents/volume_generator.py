@@ -140,11 +140,11 @@ def generate_volumes(
     # Map programme by building_id
     prog_by_building = {p["building_id"]: p for p in programmes if "building_id" in p}
 
-    # Get max height constraint
+    # Get most restrictive height constraint (minimum value = strictest limit)
     max_height = None
     for c in constraints:
         if c.get("category") == "height":
-            if max_height is None or c["value"] > max_height:
+            if max_height is None or c["value"] < max_height:
                 max_height = c["value"]
 
     volumes: List[Dict[str, Any]] = []
@@ -180,11 +180,21 @@ def generate_volumes(
             blabel = bldg.get("zone_label", f"Building {buildings_processed + 1}")
             confidence = 0.45
 
-        # Enforce height constraint
-        total_height = floors * floor_height
-        if max_height and total_height > max_height:
-            floors = max(1, int(max_height / floor_height))
+        # Enforce height constraint (accounting for plinth if present)
+        if max_height:
+            if has_plinth and floors > 1:
+                # Plinth is taller (4.5m vs 3.0m), so available height
+                # for upper floors is reduced
+                available_for_upper = max_height - DEFAULT_PLINTH_HEIGHT
+                upper_floors = max(0, int(available_for_upper / floor_height))
+                floors = 1 + upper_floors  # 1 plinth + upper floors
+            else:
+                total_height = floors * floor_height
+                if total_height > max_height:
+                    floors = max(1, int(max_height / floor_height))
             total_height = floors * floor_height
+            log.info("[Volumes] Height-capped '%s': %d floors, %.1fm (limit %.1fm)",
+                     blabel, floors, total_height, max_height)
 
         # ── Generate underground parking ──
         if has_parking:
@@ -236,17 +246,12 @@ def generate_volumes(
                 if floor_use == "residential":
                     floor_use = "retail"
                     floor_label = "Commercial Plinth"
-            elif f == 0 and has_plinth:
-                # Adjust second floor start if plinth is taller
-                y_bottom = DEFAULT_PLINTH_HEIGHT
-                y_top = DEFAULT_PLINTH_HEIGHT + floor_height
+            elif has_plinth and f > 0:
+                # Shift upper floors to start above the taller plinth
+                y_bottom = DEFAULT_PLINTH_HEIGHT + (f - 1) * floor_height
+                y_top = y_bottom + floor_height
                 volume_type = "building_floor"
             else:
-                if has_plinth and f > 0:
-                    # Shift above-ground floors up by plinth height difference
-                    height_diff = DEFAULT_PLINTH_HEIGHT - floor_height
-                    y_bottom = DEFAULT_PLINTH_HEIGHT + (f - 1) * floor_height
-                    y_top = y_bottom + floor_height
                 volume_type = "building_floor"
 
             volumes.append(_create_floor_volume(

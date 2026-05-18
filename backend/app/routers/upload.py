@@ -89,12 +89,12 @@ async def run_pipeline(request: Request):
                     zone_summary[zt] = zone_summary.get(zt, 0) + count
             classification_mode = "rule_based"
 
-    # Run constraint + programme extraction in parallel to save time.
-    # Both are independent — they only need zones + text which are ready.
+    # Run constraint extraction first, then programme extraction with
+    # the actual constraints so it respects height limits, setbacks, etc.
     resolved_model = gemini_model or "gemini-2.5-flash"
     loop = asyncio.get_event_loop()
 
-    constraint_future = loop.run_in_executor(
+    constraint_result = await loop.run_in_executor(
         None,
         lambda: extract_constraints(
             text_blocks=extracted_text_blocks,
@@ -103,19 +103,16 @@ async def run_pipeline(request: Request):
             model_name=resolved_model,
         ),
     )
-    programme_future = loop.run_in_executor(
+
+    programme_result = await loop.run_in_executor(
         None,
         lambda: extract_programme(
             text_blocks=extracted_text_blocks,
             zones=extracted_geometry,
-            constraints=[],  # regex constraints available inside extractor
+            constraints=constraint_result.get("constraints", []),
             api_key=api_key,
             model_name=resolved_model,
         ),
-    )
-
-    constraint_result, programme_result = await asyncio.gather(
-        constraint_future, programme_future
     )
 
     # Merge constraint geometry into the main geometry list
