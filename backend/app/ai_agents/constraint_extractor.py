@@ -482,142 +482,251 @@ Only suggest for categories that are genuinely missing. Return [] if unsure.
         return []
 
 
-# ── Step 4: Setback geometry generation ──
+# ── Step 4: Constraint geometry generation ──
 
-def _generate_setback_geometry(
+def _generate_constraint_geometry(
     constraints: List[Dict[str, Any]],
     zones: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Generate offset polygon geometry for setback constraints.
+    """Generate visual geometry for ALL constraint types.
 
-    For each setback constraint, creates an inward-offset dashed line
-    from the plot boundary polygon.
+    Produces three kinds of constraint geometry:
+    1. Setback offset lines — inward offset from plot boundary
+    2. Height limit rings — contour at max height on each building footprint
+    3. Buildable envelope boundary — derived from existing zones when
+       no explicit setback values were found
+
+    Returns a list of geometry dicts ready for the viewport.
     """
-    # Find the plot boundary
+    geometry: List[Dict[str, Any]] = []
+
+    # ── Find key zones ──
     plot = None
+    buildable = None
+    buildings: List[Dict[str, Any]] = []
+    no_build_zones: List[Dict[str, Any]] = []
+
     for z in zones:
-        if z.get("zone_type") == "plot_boundary" and z.get("closed"):
-            plot = z
-            break
+        zt = z.get("zone_type", "")
+        if zt == "plot_boundary" and z.get("closed"):
+            if plot is None:
+                plot = z
+        elif zt == "buildable_envelope" and z.get("closed"):
+            if buildable is None:
+                buildable = z
+        elif zt == "sub_zone" and z.get("closed"):
+            buildings.append(z)
+        elif zt in ("no_build_zone", "restriction_line") and z.get("closed"):
+            no_build_zones.append(z)
 
-    if not plot:
-        log.info("[Constraints] No plot boundary found — skipping setback geometry")
-        return []
-
-    plot_points = plot.get("points", [])
-    if len(plot_points) < 4:
-        return []
-
-    setback_constraints = [c for c in constraints if c["category"] == "setback"]
-    if not setback_constraints:
-        return []
-
-    geometry = []
-
-    for cst in setback_constraints:
-        offset_dist = cst["value"]
-        if offset_dist <= 0:
-            continue
-
-        # Try Shapely offset first
-        try:
-            from shapely.geometry import Polygon as ShapelyPolygon
-
-            # Handle both 2D and 3D points
-            pts_2d = []
-            is_3d = len(plot_points[0]) == 3
-            for pt in plot_points:
-                if is_3d:
-                    pts_2d.append((pt[0], pt[2]))  # x, z for 3D points
-                else:
-                    pts_2d.append((pt[0], pt[1]))
-
-            # Ensure closed
-            if pts_2d[0] != pts_2d[-1]:
-                pts_2d.append(pts_2d[0])
-
-            poly = ShapelyPolygon(pts_2d)
-            if not poly.is_valid:
-                from shapely.validation import make_valid
-                poly = make_valid(poly)
-
-            # Scale: we need to figure out the coordinate scale
-            # The plot points are already in normalized world coordinates
-            # where the viewport spans ~40 units. Setback in meters needs
-            # to be scaled to match.
-            # Use a heuristic: the plot boundary typically represents a
-            # real-world area. We estimate the scale from the geometry span.
-            coords = list(poly.exterior.coords)
-            xs = [c[0] for c in coords]
-            zs = [c[1] for c in coords]
-            span = max(max(xs) - min(xs), max(zs) - min(zs), 1)
-
-            # Assuming the plot is 50-200m wide in reality and spans ~20-40
-            # viewport units, scale factor is roughly span/100
-            # But we don't know the real-world size, so use a fixed proportion:
-            # offset 5m on a 100m plot = 5% inset → offset_dist/100 * span
-            # Use a reasonable default: 1m real = 0.4 viewport units
-            viewport_offset = offset_dist * (span / 100.0)
-            viewport_offset = max(viewport_offset, 0.3)  # minimum visible offset
-
-            offset_poly = poly.buffer(-viewport_offset, join_style=2)
-
-            if offset_poly.is_empty:
-                continue
-
-            # Extract the offset polygon coordinates
-            if hasattr(offset_poly, 'exterior'):
-                offset_coords = list(offset_poly.exterior.coords)
-            elif hasattr(offset_poly, 'geoms'):
-                # MultiPolygon — take largest
-                largest = max(offset_poly.geoms, key=lambda g: g.area)
-                offset_coords = list(largest.exterior.coords)
+    # Helper to extract 2D points from a zone
+    def _to_2d(pts, is_3d):
+        result = []
+        for pt in pts:
+            if is_3d:
+                result.append((pt[0], pt[2]))
             else:
-                continue
+                result.append((pt[0], pt[1]))
+        return result
 
-            # Convert back to 3D points
-            pts_3d = []
-            for c in offset_coords:
-                if is_3d:
-                    pts_3d.append([round(c[0], 4), 0, round(c[1], 4)])
-                else:
-                    pts_3d.append([round(c[0], 4), round(c[1], 4)])
-
-            # Determine color by setback type
-            name_lower = cst["name"].lower()
-            if "front" in name_lower or "voor" in name_lower:
-                color = "#ef4444"  # red
-            elif "rear" in name_lower or "achter" in name_lower:
-                color = "#f97316"  # orange
-            elif "side" in name_lower or "zij" in name_lower:
-                color = "#eab308"  # yellow
+    def _to_3d(coords_2d, is_3d, y=0):
+        result = []
+        for c in coords_2d:
+            if is_3d:
+                result.append([round(c[0], 4), round(y, 4), round(c[1], 4)])
             else:
-                color = "#ef4444"  # red default
+                result.append([round(c[0], 4), round(c[1], 4)])
+        return result
+
+    # ── 1. Explicit setback offset lines ──
+    if plot:
+        plot_points = plot.get("points", [])
+        if len(plot_points) >= 4:
+            setback_constraints = [c for c in constraints if c["category"] == "setback"]
+            for cst in setback_constraints:
+                offset_dist = cst["value"]
+                if offset_dist <= 0:
+                    continue
+                try:
+                    from shapely.geometry import Polygon as ShapelyPolygon
+
+                    is_3d = len(plot_points[0]) == 3
+                    pts_2d = _to_2d(plot_points, is_3d)
+                    if pts_2d[0] != pts_2d[-1]:
+                        pts_2d.append(pts_2d[0])
+
+                    poly = ShapelyPolygon(pts_2d)
+                    if not poly.is_valid:
+                        from shapely.validation import make_valid
+                        poly = make_valid(poly)
+
+                    coords = list(poly.exterior.coords)
+                    xs = [c[0] for c in coords]
+                    zs = [c[1] for c in coords]
+                    span = max(max(xs) - min(xs), max(zs) - min(zs), 1)
+
+                    viewport_offset = offset_dist * (span / 100.0)
+                    viewport_offset = max(viewport_offset, 0.3)
+
+                    offset_poly = poly.buffer(-viewport_offset, join_style=2)
+                    if offset_poly.is_empty:
+                        continue
+
+                    if hasattr(offset_poly, 'exterior'):
+                        offset_coords = list(offset_poly.exterior.coords)
+                    elif hasattr(offset_poly, 'geoms'):
+                        largest = max(offset_poly.geoms, key=lambda g: g.area)
+                        offset_coords = list(largest.exterior.coords)
+                    else:
+                        continue
+
+                    pts_3d = _to_3d(offset_coords, is_3d)
+
+                    name_lower = cst["name"].lower()
+                    if "front" in name_lower or "voor" in name_lower:
+                        color = "#ef4444"
+                    elif "rear" in name_lower or "achter" in name_lower:
+                        color = "#f97316"
+                    elif "side" in name_lower or "zij" in name_lower:
+                        color = "#eab308"
+                    else:
+                        color = "#ef4444"
+
+                    geometry.append({
+                        "id": f"cst_geo_{uuid.uuid4().hex[:8]}",
+                        "type": "Polygon",
+                        "zone_type": "setback_line",
+                        "zone_label": f"{cst['name']} ({cst['value']}{cst['unit']})",
+                        "points": pts_3d,
+                        "closed": True,
+                        "color_hint": color,
+                        "stroke_width": 2.0,
+                        "dashed": True,
+                        "confidence": cst["confidence"],
+                        "classification_method": "constraint_offset",
+                        "constraint_id": cst["id"],
+                        "constraint_value": f"{cst['value']}{cst['unit']}",
+                    })
+                    log.info("[Constraints] Generated setback geometry for '%s' (%.1f%s)",
+                             cst["name"], cst["value"], cst["unit"])
+
+                except Exception as e:
+                    log.warning("[Constraints] Setback geometry failed for '%s': %s",
+                                cst["name"], e)
+
+    # ── 2. Derived setback from buildable_envelope ──
+    # If there's a buildable_envelope zone but no explicit setback geometry
+    # was generated, re-emit the buildable_envelope as a constraint contour.
+    has_setback_geo = any(g["zone_type"] == "setback_line" for g in geometry)
+    if buildable and not has_setback_geo:
+        be_pts = buildable.get("points", [])
+        if len(be_pts) >= 4:
+            is_3d = len(be_pts[0]) == 3
+            pts_3d = _to_3d(_to_2d(be_pts, is_3d), is_3d)
 
             geometry.append({
                 "id": f"cst_geo_{uuid.uuid4().hex[:8]}",
                 "type": "Polygon",
                 "zone_type": "setback_line",
-                "zone_label": cst["name"],
+                "zone_label": "Buildable Envelope (bouwvlak)",
                 "points": pts_3d,
                 "closed": True,
-                "color_hint": color,
-                "stroke_width": 1.5,
+                "color_hint": "#ef4444",
+                "stroke_width": 2.5,
                 "dashed": True,
-                "confidence": cst["confidence"],
-                "classification_method": "constraint_offset",
-                "constraint_id": cst["id"],
-                "constraint_value": f"{cst['value']}{cst['unit']}",
+                "confidence": buildable.get("confidence", 0.7),
+                "classification_method": "derived_from_buildable_envelope",
+                "constraint_value": "derived",
+                "marker_labels": [],
+            })
+            log.info("[Constraints] Derived setback contour from buildable_envelope zone")
+
+    # ── 3. Height limit contours ──
+    height_constraints = [c for c in constraints if c["category"] == "height"]
+    if height_constraints and buildings:
+        # Use the maximum height constraint
+        max_height_cst = max(height_constraints, key=lambda c: c["value"])
+        height_val = max_height_cst["value"]
+
+        # Scale: viewport Y maps from PDF coordinates via 0.1 scale,
+        # but heights in meters need their own mapping.
+        # Use a reasonable heuristic: 1m ≈ 0.3 viewport units
+        y_limit = height_val * 0.3
+
+        for bldg in buildings:
+            bldg_pts = bldg.get("points", [])
+            if len(bldg_pts) < 3:
+                continue
+
+            is_3d = len(bldg_pts[0]) == 3
+
+            # Create a ring at the height limit elevation
+            pts_at_height = []
+            for pt in bldg_pts:
+                if is_3d:
+                    pts_at_height.append([pt[0], round(y_limit, 4), pt[2]])
+                else:
+                    pts_at_height.append([pt[0], round(y_limit, 4), pt[1] if len(pt) > 1 else 0])
+
+            # Close the ring
+            if pts_at_height and pts_at_height[0] != pts_at_height[-1]:
+                pts_at_height.append(pts_at_height[0])
+
+            centroid = bldg.get("centroid", [0, 0, 0])
+
+            geometry.append({
+                "id": f"cst_geo_{uuid.uuid4().hex[:8]}",
+                "type": "Polygon",
+                "zone_type": "height_limit",
+                "zone_label": f"Max Height {height_val}m",
+                "points": pts_at_height,
+                "closed": True,
+                "color_hint": "#f59e0b",
+                "stroke_width": 2.0,
+                "dashed": True,
+                "confidence": max_height_cst["confidence"],
+                "classification_method": "height_limit_contour",
+                "constraint_value": f"{height_val}m",
+                "centroid": [centroid[0] if len(centroid) > 0 else 0,
+                             round(y_limit, 4),
+                             centroid[2] if len(centroid) > 2 else 0],
+                "y_bottom": round(y_limit, 4),
+                "y_top": round(y_limit, 4),
+                "marker_labels": [],
             })
 
-            log.info("[Constraints] Generated setback geometry for '%s' (%.1f%s, offset=%.2f units)",
-                     cst["name"], cst["value"], cst["unit"], viewport_offset)
+        log.info("[Constraints] Generated %d height limit contour(s) at %.1fm",
+                 len(buildings), height_val)
 
-        except Exception as e:
-            log.warning("[Constraints] Setback geometry generation failed for '%s': %s",
-                        cst["name"], e)
+    # ── 4. No-build zone boundaries as constraints ──
+    for nbz in no_build_zones:
+        nbz_pts = nbz.get("points", [])
+        if len(nbz_pts) < 3:
             continue
 
+        is_3d = len(nbz_pts[0]) == 3
+        pts_3d = _to_3d(_to_2d(nbz_pts, is_3d), is_3d)
+
+        geometry.append({
+            "id": f"cst_geo_{uuid.uuid4().hex[:8]}",
+            "type": "Polygon",
+            "zone_type": "setback_line",
+            "zone_label": f"No-Build Zone ({nbz.get('zone_label', '')})" if nbz.get("zone_label") else "No-Build Zone",
+            "points": pts_3d,
+            "closed": True,
+            "color_hint": "#dc2626",
+            "stroke_width": 2.5,
+            "dashed": True,
+            "confidence": nbz.get("confidence", 0.65),
+            "classification_method": "no_build_boundary",
+            "marker_labels": [],
+        })
+
+    if no_build_zones:
+        log.info("[Constraints] Added %d no-build zone constraint boundaries",
+                 len(no_build_zones))
+
+    log.info("[Constraints] Total constraint geometry: %d items", len(geometry))
     return geometry
 
 
@@ -664,8 +773,8 @@ def extract_constraints(
         )
     all_constraints.extend(suggestions)
 
-    # Step 4: Generate setback geometry
-    setback_geometry = _generate_setback_geometry(all_constraints, zones)
+    # Step 4: Generate constraint geometry (setbacks, height limits, no-build zones)
+    constraint_geometry = _generate_constraint_geometry(all_constraints, zones)
 
     # Summary
     summary = {
@@ -673,17 +782,17 @@ def extract_constraints(
         "regex_extracted": len(regex_constraints),
         "ai_extracted": len(ai_constraints),
         "ai_suggested": len(suggestions),
-        "setback_geometries": len(setback_geometry),
+        "constraint_geometries": len(constraint_geometry),
         "categories": list({c["category"] for c in all_constraints}),
     }
 
-    log.info("[Constraints] Done: %d total (%d regex, %d AI, %d suggested), %d setback geometries",
+    log.info("[Constraints] Done: %d total (%d regex, %d AI, %d suggested), %d constraint geometries",
              summary["total"], summary["regex_extracted"],
              summary["ai_extracted"], summary["ai_suggested"],
-             summary["setback_geometries"])
+             summary["constraint_geometries"])
 
     return {
         "constraints": all_constraints,
-        "constraint_geometry": setback_geometry,
+        "constraint_geometry": constraint_geometry,
         "extraction_summary": summary,
     }

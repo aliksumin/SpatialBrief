@@ -28,6 +28,14 @@ const ZONE_COLORS: Record<string, string> = {
   cad_context: '#64748b',
   context_line: '#64748b',
   minor_context: '#475569',
+  // Constraints
+  setback_line: '#ef4444',
+  height_limit: '#f59e0b',
+  constraint_zone: '#f97316',
+  // Volumes
+  building_floor: '#8b5cf6',
+  plinth: '#f97316',
+  underground_parking: '#475569',
 };
 
 const ZONE_LABELS: Record<string, string> = {
@@ -47,6 +55,14 @@ const ZONE_LABELS: Record<string, string> = {
   cad_context: 'CAD Context',
   context_line: 'Context',
   minor_context: 'Minor',
+  // Constraints
+  setback_line: 'Setback Line',
+  height_limit: 'Height Limit',
+  constraint_zone: 'Constraint',
+  // Volumes
+  building_floor: 'Floor',
+  plinth: 'Plinth',
+  underground_parking: 'Underground Parking',
 };
 
 /* Line style config per zone type */
@@ -60,17 +76,28 @@ const LINE_STYLES: Record<string, { width: number; dashed?: boolean; dashScale?:
   infrastructure_zone:{ width: 1.5, dashed: true, dashScale: 6 },
   context_line:       { width: 1.0, dashed: true, dashScale: 10 },
   minor_context:      { width: 0.8 },
+  setback_line:       { width: 2.5, dashed: true, dashScale: 6 },
+  height_limit:       { width: 2.0, dashed: true, dashScale: 8 },
+  building_floor:     { width: 1.0 },
+  plinth:             { width: 1.2 },
+  underground_parking:{ width: 0.8, dashed: true, dashScale: 10 },
 };
 
-/* Category buckets — matches extraction hierarchy: Boundaries > Zones > Buildings */
+/* Category buckets — matches extraction hierarchy */
 const BOUNDARY_TYPES = ['plot_boundary', 'zone_boundary', 'parcel_line', 'major_boundary', 'restriction_line'];
 const ZONE_TYPES = ['buildable_envelope', 'landscape_zone', 'infrastructure_zone', 'filled_zone', 'no_build_zone', 'uncategorized_zone', 'traffic_zone'];
 const BUILDING_TYPES = ['sub_zone'];
+const CONSTRAINT_TYPES = ['setback_line', 'height_limit', 'constraint_zone'];
+const VOLUME_TYPES = ['building_floor', 'plinth', 'underground_parking'];
 const INFRA_TYPES = ['context_line', 'minor_context', 'cad_context'];
 
-function categorize(zt: string): 'BOUNDARIES' | 'ZONES' | 'BUILDINGS' | 'INFRASTRUCTURE' {
+type LayerCategory = 'BOUNDARIES' | 'ZONES' | 'BUILDINGS' | 'CONSTRAINTS' | 'VOLUMES' | 'INFRASTRUCTURE';
+
+function categorize(zt: string): LayerCategory {
   if (BOUNDARY_TYPES.includes(zt)) return 'BOUNDARIES';
   if (BUILDING_TYPES.includes(zt)) return 'BUILDINGS';
+  if (CONSTRAINT_TYPES.includes(zt)) return 'CONSTRAINTS';
+  if (VOLUME_TYPES.includes(zt)) return 'VOLUMES';
   if (INFRA_TYPES.includes(zt)) return 'INFRASTRUCTURE';
   return 'ZONES';
 }
@@ -410,6 +437,110 @@ function InfraLine({ vec, color, opacity }: { vec: any; color: string; opacity: 
   );
 }
 
+/* ────── Volume box — extruded floor polygon ────── */
+function VolumeBox({ vec, color, opacity, selected, onSelect }: { vec: any; color: string; opacity: number; selected: boolean; onSelect: () => void }) {
+  const [hovered, setHovered] = useState(false);
+
+  const { geometry, edgesPts } = useMemo(() => {
+    if (!vec.points || vec.points.length < 3) return { geometry: null, edgesPts: null };
+    const yBottom = vec.y_bottom ?? 0;
+    const yTop = vec.y_top ?? (yBottom + (vec.height || 3));
+
+    // Collect unique 2D footprint points (x, z)
+    const pts2d: [number, number][] = [];
+    const seen = new Set<string>();
+    for (const p of vec.points) {
+      const key = `${p[0].toFixed(3)}_${(p[2] ?? p[1] ?? 0).toFixed(3)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        pts2d.push([p[0], p[2] ?? p[1] ?? 0]);
+      }
+    }
+    if (pts2d.length < 3) return { geometry: null, edgesPts: null };
+
+    // Ensure CCW winding
+    let shoelace = 0;
+    for (let i = 0; i < pts2d.length; i++) {
+      const j = (i + 1) % pts2d.length;
+      shoelace += pts2d[i][0] * pts2d[j][1] - pts2d[j][0] * pts2d[i][1];
+    }
+    if (shoelace < 0) pts2d.reverse();
+
+    try {
+      const shape = new THREE.Shape();
+      shape.moveTo(pts2d[0][0], pts2d[0][1]);
+      for (let i = 1; i < pts2d.length; i++) shape.lineTo(pts2d[i][0], pts2d[i][1]);
+      shape.closePath();
+
+      const height = yTop - yBottom;
+      const extrudeSettings = { depth: height, bevelEnabled: false };
+      const extGeo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+      // Rotate from XY+Z-depth to XZ+Y-height (swap Y and Z)
+      const pos = extGeo.getAttribute('position');
+      for (let i = 0; i < pos.count; i++) {
+        const sx = pos.getX(i);
+        const sy = pos.getY(i);
+        const sz = pos.getZ(i);
+        pos.setXYZ(i, sx, yBottom + sz, sy);
+      }
+      pos.needsUpdate = true;
+      extGeo.computeVertexNormals();
+
+      // Build edge lines: bottom ring, top ring, and verticals
+      const bottomRing: [number, number, number][] = pts2d.map(p => [p[0], yBottom, p[1]]);
+      bottomRing.push(bottomRing[0]);
+      const topRing: [number, number, number][] = pts2d.map(p => [p[0], yTop, p[1]]);
+      topRing.push(topRing[0]);
+      const verticals: [number, number, number][][] = pts2d.map(p => [
+        [p[0], yBottom, p[1]],
+        [p[0], yTop, p[1]],
+      ]);
+
+      return { geometry: extGeo, edgesPts: { bottomRing, topRing, verticals } };
+    } catch {
+      return { geometry: null, edgesPts: null };
+    }
+  }, [vec]);
+
+  if (!geometry) return null;
+
+  const fillOp = (selected ? 0.45 : hovered ? 0.35 : 0.25) * opacity;
+  const edgeOp = (selected ? 1.0 : hovered ? 0.8 : 0.55) * opacity;
+  const edgeW = selected ? 2.0 : hovered ? 1.5 : 1.0;
+  const label = vec.zone_label || ZONE_LABELS[vec.zone_type] || vec.zone_type;
+
+  return (
+    <group onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+      <mesh geometry={geometry}>
+        <meshStandardMaterial color={color} transparent opacity={fillOp} side={THREE.DoubleSide}
+          depthWrite={false} polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
+      </mesh>
+      {edgesPts && (
+        <>
+          <Line points={edgesPts.bottomRing} color={color} lineWidth={edgeW} transparent opacity={edgeOp} />
+          <Line points={edgesPts.topRing} color={color} lineWidth={edgeW} transparent opacity={edgeOp} />
+          {edgesPts.verticals.map((vl: any, i: number) => (
+            <Line key={i} points={vl} color={color} lineWidth={edgeW * 0.7} transparent opacity={edgeOp * 0.6} />
+          ))}
+        </>
+      )}
+      {selected && <mesh geometry={geometry}>
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.08} side={THREE.DoubleSide} depthWrite={false} />
+      </mesh>}
+      {(hovered || selected) && vec.centroid && (
+        <Html position={[vec.centroid[0], (vec.y_top ?? vec.centroid[1] ?? 0) + 0.5, vec.centroid[2]]} center style={{ pointerEvents: 'none' }}>
+          <div className="zone-pill-label" style={{ borderColor: `${color}60` }}>
+            <span className="zone-pill-dot" style={{ background: color }} />
+            {label}
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
 /* ────── Main scene manager ────── */
 export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, activeNode, onSelectNode, onSelectVector, projectData }) => {
   const [legendOpen, setLegendOpen] = useState(true);
@@ -419,8 +550,8 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
 
   const [visibleLayers, setVisibleLayers] = useState(() => {
     const saved = localStorage.getItem('omrt_visibleLayers');
-    if (saved) { try { return JSON.parse(saved); } catch {} }
-    return { BOUNDARIES: true, ZONES: true, BUILDINGS: true, INFRASTRUCTURE: true };
+    if (saved) { try { const p = JSON.parse(saved); return { BOUNDARIES: true, ZONES: true, BUILDINGS: true, CONSTRAINTS: true, VOLUMES: true, INFRASTRUCTURE: true, ...p }; } catch {} }
+    return { BOUNDARIES: true, ZONES: true, BUILDINGS: true, CONSTRAINTS: true, VOLUMES: true, INFRASTRUCTURE: true };
   });
 
   useEffect(() => { localStorage.setItem('omrt_visibleLayers', JSON.stringify(visibleLayers)); }, [visibleLayers]);
@@ -442,26 +573,30 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
     onSelectVector?.(newId ? vec : null);
   }, [selectedVectorId, onSelectVector]);
 
-  // Categorized + sublayer counts — matches hierarchy: Boundaries > Zones > Buildings
+  // Categorized + sublayer counts — matches hierarchy: Boundaries > Zones > Buildings > Constraints > Volumes
   const { categorized, sublayers } = useMemo(() => {
     const boundaries: any[] = [];
     const zones: any[] = [];
     const buildings: any[] = [];
+    const constraints: any[] = [];
+    const volumes: any[] = [];
     const infra: any[] = [];
-    const sub: Record<string, Record<string, any[]>> = { BOUNDARIES: {}, ZONES: {}, BUILDINGS: {}, INFRASTRUCTURE: {} };
+    const sub: Record<string, Record<string, any[]>> = { BOUNDARIES: {}, ZONES: {}, BUILDINGS: {}, CONSTRAINTS: {}, VOLUMES: {}, INFRASTRUCTURE: {} };
 
     for (const v of vectors) {
       const zt = v.zone_type || 'unknown';
       const cat = categorize(zt);
       if (cat === 'BOUNDARIES') boundaries.push(v);
       else if (cat === 'BUILDINGS') buildings.push(v);
+      else if (cat === 'CONSTRAINTS') constraints.push(v);
+      else if (cat === 'VOLUMES') volumes.push(v);
       else if (cat === 'INFRASTRUCTURE') infra.push(v);
       else zones.push(v);
 
       if (!sub[cat][zt]) sub[cat][zt] = [];
       sub[cat][zt].push(v);
     }
-    return { categorized: { boundaries, zones, buildings, infra }, sublayers: sub };
+    return { categorized: { boundaries, zones, buildings, constraints, volumes, infra }, sublayers: sub };
   }, [vectors]);
 
   const getOpacity = (defaultOpacity: number = 1.0) => {
@@ -485,6 +620,8 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
     BOUNDARIES: { label: 'Boundaries', dot: '#3b82f6', icon: '◻' },
     ZONES: { label: 'Zones', dot: '#f97316', icon: '◼' },
     BUILDINGS: { label: 'Buildings', dot: '#8b5cf6', icon: '⊞' },
+    CONSTRAINTS: { label: 'Constraints', dot: '#ef4444', icon: '⊘' },
+    VOLUMES: { label: 'Generated Volumes', dot: '#a855f7', icon: '▦' },
     INFRASTRUCTURE: { label: 'Infrastructure', dot: '#94a3b8', icon: '┅' },
   };
 
@@ -516,7 +653,7 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
         </button>
         {legendOpen && (
           <div className="legend-body">
-            {(['BOUNDARIES', 'ZONES', 'BUILDINGS', 'INFRASTRUCTURE'] as const).map(cat => {
+            {(['BOUNDARIES', 'ZONES', 'BUILDINGS', 'CONSTRAINTS', 'VOLUMES', 'INFRASTRUCTURE'] as const).map(cat => {
               const meta = SECTION_META[cat];
               const subs = sublayers[cat];
               const subKeys = Object.keys(subs);
@@ -604,6 +741,24 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#8b5cf6';
                 return (
                   <BoundaryOutline key={`bld-${idx}`} vec={vec} color={color} opacity={getOpacity(0.85)}
+                    selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
+                );
+              })}
+
+              {/* Constraints — dashed setback/height lines */}
+              {visibleLayers.CONSTRAINTS && categorized.constraints.map((vec: any, idx: number) => {
+                const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#ef4444';
+                return (
+                  <BoundaryOutline key={`cst-${idx}`} vec={vec} color={color} opacity={getOpacity(0.85)}
+                    selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
+                );
+              })}
+
+              {/* Volumes — extruded floor boxes */}
+              {visibleLayers.VOLUMES && categorized.volumes.map((vec: any, idx: number) => {
+                const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#8b5cf6';
+                return (
+                  <VolumeBox key={`vol-${idx}`} vec={vec} color={color} opacity={getOpacity(0.7)}
                     selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
                 );
               })}

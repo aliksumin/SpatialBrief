@@ -152,8 +152,6 @@ async def run_pipeline(request: Request):
         if programme_result.get("extraction_summary", {}).get("ai_extracted", 0) > 0 or \
            programme_result.get("extraction_summary", {}).get("ai_suggested", 0) > 0:
             ai_models["programme_extraction"] = resolved_model
-        if extracted_geometry:
-            ai_models["zone_validation"] = resolved_model
 
     response = {
         "status": "success",
