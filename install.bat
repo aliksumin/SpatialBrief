@@ -39,6 +39,9 @@ call venv\Scripts\activate.bat
 pip install -r requirements.txt --quiet
 call deactivate
 
+:: Create uploads directory (gitignored, needed at runtime)
+if not exist "uploads" mkdir uploads
+
 echo [OK] Backend dependencies installed
 
 :: ── Frontend Setup ──
