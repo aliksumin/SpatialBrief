@@ -198,6 +198,7 @@ def _generate_brief_with_ai(
     zone_analysis: Dict[str, Any],
     api_key: str,
     model_name: str,
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """Use Gemini to produce a detailed site brief from all available context."""
     try:
@@ -225,35 +226,41 @@ guide downstream building-extraction agents.
 {json.dumps(zone_analysis, indent=2)}
 
 ── YOUR TASK ──
-Produce a comprehensive site brief with these fields:
-
-1. expected_buildable_zones: How many distinct buildable zones/envelopes? (int)
-2. expected_building_count: Total buildings across all zones (int)
-3. buildings_per_zone: Array of {{"zone_index": 0, "building_count": N, "typology": "...", "floors": N, "gfa": N}}
-4. dominant_typology: Main building type ("tower", "row_house", "apartment_block", "detached", "semi_detached", "plinth_tower", "mixed_use")
-5. site_gfa_target: Total target GFA for the whole site (float, m²)
-6. max_height: Maximum building height in meters (float)
-7. has_plinth_buildings: Are plinth+tower typologies expected? (bool)
-8. has_underground_parking: Is underground parking expected? (bool)
-9. density_notes: Brief description of expected density/coverage
-10. special_rules: Array of strings — any special rules the agents should follow
-
-If information is NOT available from the text, make reasonable inferences from
-the geometry analysis. If truly unknown, use null.
+Produce a comprehensive site brief. Pay special attention to PER-ZONE RULES —
+different buildable zones often have different height limits, GFA targets, density
+requirements, and typologies. Extract these individually.
 
 Return ONLY valid JSON:
 {{
-  "expected_buildable_zones": ...,
-  "expected_building_count": ...,
-  "buildings_per_zone": [...],
-  "dominant_typology": "...",
-  "site_gfa_target": ...,
-  "max_height": ...,
-  "has_plinth_buildings": ...,
-  "has_underground_parking": ...,
-  "density_notes": "...",
-  "special_rules": [...]
+  "expected_buildable_zones": <int>,
+  "expected_building_count": <int>,
+  "dominant_typology": "<tower|row_house|apartment_block|detached|semi_detached|plinth_tower|mixed_use>",
+  "site_gfa_target": <float or null>,
+  "max_height": <float or null>,
+  "has_plinth_buildings": <bool>,
+  "has_underground_parking": <bool>,
+  "density_notes": "<string>",
+  "special_rules": ["<rule1>", ...],
+  "zone_rules": [
+    {{
+      "zone_index": 0,
+      "zone_label": "<name from document, e.g. 'Gemengd' or 'Zone A'>",
+      "max_height_m": <float or null>,
+      "target_gfa_m2": <float or null>,
+      "setback_m": <float or null>,
+      "density_grz": <float 0-1 or null>,
+      "fsi": <float or null>,
+      "expected_buildings": <int>,
+      "typology": "<tower|row_house|apartment_block|plinth_tower|mixed_use>",
+      "use": "<residential|commercial|mixed_use|retail|office>"
+    }},
+    ...
+  ]
 }}
+
+CRITICAL: "zone_rules" must have one entry per buildable zone. If the document
+specifies different height/GFA/density for different zones, capture each separately.
+If not specified per-zone, distribute the site-wide values proportionally.
 """
 
         client = genai.Client(api_key=api_key)
@@ -264,6 +271,8 @@ Return ONLY valid JSON:
                 response_mime_type="application/json",
             ),
         )
+        if cost_tracker is not None:
+            cost_tracker.add(response, model_name, stage="site_brief")
 
         text = response.text.strip()
         if "```json" in text:
@@ -293,6 +302,7 @@ def generate_site_brief(
     page_area: float,
     api_key: Optional[str] = None,
     model_name: str = "gemini-2.5-flash",
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """
     Produce a site brief that guides downstream extraction agents.
@@ -326,36 +336,41 @@ def generate_site_brief(
     if api_key:
         ai_brief = _generate_brief_with_ai(
             text_blocks, regex_brief, zone_analysis, api_key, model_name,
+            cost_tracker=cost_tracker,
         )
 
     # Merge: AI > regex > geometry inference
+    n_zones = (
+        ai_brief.get("expected_buildable_zones")
+        or regex_brief["expected_zone_count"]
+        or max(len(zone_analysis["large_filled_zones"]), 1)
+    )
+    site_gfa = (
+        ai_brief.get("site_gfa_target")
+        or (max(regex_brief["gfa_values"]) if regex_brief["gfa_values"] else None)
+    )
+    max_h = (
+        ai_brief.get("max_height")
+        or (max(regex_brief["height_values"]) if regex_brief["height_values"] else None)
+    )
+    expected_floors = (
+        max(regex_brief["floor_counts"]) if regex_brief["floor_counts"] else None
+    )
+
     brief = {
-        "expected_buildable_zones": (
-            ai_brief.get("expected_buildable_zones")
-            or regex_brief["expected_zone_count"]
-            or max(len(zone_analysis["large_filled_zones"]), 1)
-        ),
+        "expected_buildable_zones": n_zones,
         "expected_building_count": (
             ai_brief.get("expected_building_count")
             or regex_brief["expected_building_count"]
             or max(zone_analysis["building_candidates"], 1)
         ),
-        "buildings_per_zone": ai_brief.get("buildings_per_zone", []),
         "dominant_typology": (
             ai_brief.get("dominant_typology")
             or (regex_brief["typologies"][0] if regex_brief["typologies"] else "apartment_block")
         ),
-        "site_gfa_target": (
-            ai_brief.get("site_gfa_target")
-            or (max(regex_brief["gfa_values"]) if regex_brief["gfa_values"] else None)
-        ),
-        "max_height": (
-            ai_brief.get("max_height")
-            or (max(regex_brief["height_values"]) if regex_brief["height_values"] else None)
-        ),
-        "expected_floors": (
-            max(regex_brief["floor_counts"]) if regex_brief["floor_counts"] else None
-        ),
+        "site_gfa_target": site_gfa,
+        "max_height": max_h,
+        "expected_floors": expected_floors,
         "has_plinth_buildings": ai_brief.get("has_plinth_buildings", False),
         "has_underground_parking": ai_brief.get("has_underground_parking", False),
         "density_notes": ai_brief.get("density_notes", ""),
@@ -364,6 +379,47 @@ def generate_site_brief(
         "geometry_analysis": zone_analysis,
     }
 
+    # ── Build zone_rules (per-zone constraints) ──
+    ai_zone_rules = ai_brief.get("zone_rules", [])
+    if ai_zone_rules and len(ai_zone_rules) > 0:
+        brief["zone_rules"] = ai_zone_rules
+        log.info("[SiteBrief] AI provided %d zone_rules", len(ai_zone_rules))
+    else:
+        # Fallback: generate suggested rules for each expected zone
+        default_height = max_h or 15.0
+        default_density = 0.4
+        default_floors = expected_floors or max(1, int(default_height / 3.0))
+
+        # Estimate site area from page_area (heuristic: ~10% of page is site)
+        estimated_site_area = page_area * 0.08  # rough proxy in page units²
+
+        zone_rules = []
+        for i in range(n_zones):
+            zone_area_share = estimated_site_area / max(n_zones, 1)
+            zone_gfa = None
+            if site_gfa:
+                zone_gfa = round(site_gfa / max(n_zones, 1), 1)
+            else:
+                # Suggest: zone_area × density × floors
+                zone_gfa = round(zone_area_share * default_density * default_floors, 1)
+
+            zone_rules.append({
+                "zone_index": i,
+                "zone_label": f"Zone {i + 1}",
+                "max_height_m": default_height,
+                "target_gfa_m2": zone_gfa if zone_gfa and zone_gfa > 50 else None,
+                "setback_m": 3.0,
+                "density_grz": default_density,
+                "fsi": None,
+                "expected_buildings": max(1, brief["expected_building_count"] // max(n_zones, 1)),
+                "typology": brief["dominant_typology"],
+                "use": "mixed_use",
+                "source": "ai_suggested",
+            })
+        brief["zone_rules"] = zone_rules
+        log.info("[SiteBrief] Generated %d suggested zone_rules (no per-zone data in documents)",
+                 len(zone_rules))
+
     log.info("[SiteBrief] Final brief: %d zones, %d buildings expected, typology=%s, GFA=%s",
              brief["expected_buildable_zones"],
              brief["expected_building_count"],
@@ -371,3 +427,4 @@ def generate_site_brief(
              brief["site_gfa_target"])
 
     return brief
+

@@ -514,6 +514,12 @@ export default function App() {
         label: 'AI Vision',
         message: 'Zone classification powered by Gemini Vision',
       },
+      'ai_ensemble': {
+        className: 'ai-vision',
+        dotColor: '#34d399',
+        label: 'AI Ensemble',
+        message: 'Multi-agent classification powered by Gemini',
+      },
       'rule_based': {
         className: 'rule-based',
         dotColor: '#fbbf24',

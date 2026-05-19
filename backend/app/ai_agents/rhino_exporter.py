@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -538,10 +539,21 @@ def _try_rhino3dm_export(
                  len(parent_layer_indices), len(sublayer_indices),
                  len(geometry))
 
-        # Write to buffer
-        buf = io.BytesIO()
-        model.Write(buf)
-        return buf.getvalue()
+        # Write to temp file (rhino3dm.Write requires a file path, not BytesIO)
+        import tempfile
+        tmp_path = os.path.join(tempfile.gettempdir(), f"omrt_export_{os.getpid()}.3dm")
+        try:
+            success = model.Write(tmp_path, version=8)
+            if not success:
+                log.error("[3DM Export] model.Write() returned False")
+                return None
+            with open(tmp_path, "rb") as f:
+                data = f.read()
+            log.info("[3DM Export] Successfully wrote %d bytes", len(data))
+            return data
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     except Exception as e:
         log.error("[3DM Export] Failed: %s", e)

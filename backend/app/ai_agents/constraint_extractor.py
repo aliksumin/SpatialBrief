@@ -300,6 +300,7 @@ def _extract_with_ai(
     existing_constraints: List[Dict[str, Any]],
     api_key: str,
     model_name: str,
+    cost_tracker=None,
 ) -> List[Dict[str, Any]]:
     """Use Gemini to extract structured constraints from text + zone context."""
     try:
@@ -374,6 +375,8 @@ If no additional constraints are found, return an empty array: []
                 response_mime_type="application/json",
             ),
         )
+        if cost_tracker is not None:
+            cost_tracker.add(response, model_name, stage="constraint_extraction")
 
         text = response.text.strip()
         if "```json" in text:
@@ -436,6 +439,7 @@ def _gap_fill_with_ai(
     text_blocks: List[Dict[str, Any]],
     api_key: str,
     model_name: str,
+    cost_tracker=None,
 ) -> List[Dict[str, Any]]:
     """If constraints are sparse, suggest regional defaults."""
     if len(existing_constraints) >= 3:
@@ -499,6 +503,8 @@ Only suggest for categories that are genuinely missing. Return [] if unsure.
                 response_mime_type="application/json",
             ),
         )
+        if cost_tracker is not None:
+            cost_tracker.add(response, model_name, stage="constraint_gap_fill")
 
         text = response.text.strip()
         if "```json" in text:
@@ -801,6 +807,8 @@ def extract_constraints(
     zones: List[Dict[str, Any]],
     api_key: Optional[str] = None,
     model_name: str = "gemini-2.5-flash",
+    cost_tracker=None,
+    site_brief: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Extract regulatory constraints from text blocks and zone metadata.
@@ -810,6 +818,7 @@ def extract_constraints(
             "constraints": [...],           # List of constraint objects
             "constraint_geometry": [...],    # Setback offset geometry
             "extraction_summary": {...},     # Stats about extraction
+            "zone_rules": [...],            # Per-zone constraint rules (merged)
         }
     """
     log.info("[Constraints] Starting constraint extraction from %d text blocks, %d zones",
@@ -824,6 +833,7 @@ def extract_constraints(
     if api_key:
         ai_constraints = _extract_with_ai(
             text_blocks, zones, regex_constraints, api_key, model_name,
+            cost_tracker=cost_tracker,
         )
 
     # Combine
@@ -834,8 +844,67 @@ def extract_constraints(
     if api_key:
         suggestions = _gap_fill_with_ai(
             all_constraints, text_blocks, api_key, model_name,
+            cost_tracker=cost_tracker,
         )
     all_constraints.extend(suggestions)
+
+    # ── Step 3b: Tag constraints with zone_id using text matching ──
+    # Try to match constraints to specific buildable zones by zone label
+    buildable = [z for z in zones
+                 if z.get("zone_type") in ("buildable_envelope", "filled_zone",
+                                            "uncategorized_zone")
+                 and z.get("closed")]
+    for c in all_constraints:
+        c.setdefault("zone_id", None)  # site-wide by default
+        applies = c.get("applies_to", "").lower()
+        raw_q = c.get("raw_quote", "").lower()
+        # Try matching by zone label text
+        for bz in buildable:
+            label = (bz.get("zone_label") or "").lower()
+            if label and len(label) > 2:
+                if label in applies or label in raw_q:
+                    c["zone_id"] = bz["id"]
+                    log.debug("[Constraints] Matched constraint '%s' → zone '%s'",
+                              c.get("name"), label)
+                    break
+
+    # ── Step 3c: Merge with zone_rules from site brief ──
+    zone_rules = []
+    if site_brief and site_brief.get("zone_rules"):
+        zone_rules = list(site_brief["zone_rules"])  # copy
+
+        # Enrich zone_rules with extracted per-zone constraints
+        for c in all_constraints:
+            if c.get("zone_id"):
+                # Find matching zone_rule by label similarity
+                for zr in zone_rules:
+                    zr_label = (zr.get("zone_label") or "").lower()
+                    bz_match = next(
+                        (z for z in buildable if z["id"] == c["zone_id"]),
+                        None
+                    )
+                    if bz_match:
+                        bz_label = (bz_match.get("zone_label") or "").lower()
+                        if zr_label and bz_label and (
+                            zr_label in bz_label or bz_label in zr_label
+                        ):
+                            # Override zone_rule with document-extracted value
+                            cat = c.get("category")
+                            if cat == "height" and c.get("value"):
+                                zr["max_height_m"] = c["value"]
+                                zr["source"] = "document"
+                            elif cat == "gfa" and c.get("value"):
+                                zr["target_gfa_m2"] = c["value"]
+                                zr["source"] = "document"
+                            elif cat == "setback" and c.get("value"):
+                                zr["setback_m"] = c["value"]
+                                zr["source"] = "document"
+                            elif cat == "density" and c.get("value"):
+                                zr["density_grz"] = c["value"]
+                                zr["source"] = "document"
+
+        log.info("[Constraints] Merged %d zone_rules with extracted constraints",
+                 len(zone_rules))
 
     # Step 4: Generate constraint geometry (setbacks, height limits, no-build zones)
     constraint_geometry = _generate_constraint_geometry(all_constraints, zones)
@@ -859,4 +928,6 @@ def extract_constraints(
         "constraints": all_constraints,
         "constraint_geometry": constraint_geometry,
         "extraction_summary": summary,
+        "zone_rules": zone_rules,
     }
+

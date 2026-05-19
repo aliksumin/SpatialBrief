@@ -52,7 +52,7 @@ Core packages (installed via `requirements.txt`):
 | **ezdxf** | DXF/CAD file parsing and fallback export |
 | **google-genai** | Google Gemini API (unified SDK) for AI vision classification and constraint extraction |
 | **openai** | OpenAI-compatible API client (optional provider) |
-| **rhino3dm** *(optional, commented out)* | Native .3dm export with sublayer hierarchy and User Attributes (requires Python ≤ 3.13). Install manually with `pip install rhino3dm` |
+| **rhino3dm** | Native .3dm export with sublayer hierarchy and Rhino User Attributes (requires Python ≤ 3.13) |
 
 ### Vector Conversion Dependency
 
@@ -124,13 +124,13 @@ SpatialBrief processes documents through a 9-node pipeline:
 | 2 | **Classify Documents** | Determine file roles (zoning map vs. regulatory text) via AI |
 | 3 | **Extract Programme** | Programme, GFA targets, building metadata — formulates tasks for vector extraction via site brief |
 | 4 | **Detect Units & Coordinates** | Detect drawing scale, units and coordinate origin |
-| 5 | **Extract Vector Geometry** | Multi-agent ensemble extraction of zones, buildings and boundaries |
-| 6 | **Extract Constraints** | AI-powered setback, height, density & parking rule extraction with geometry generation |
+| 5 | **Extract Constraints** | AI-powered setback, height, density, GFA & parking rule extraction with per-zone constraint mapping |
+| 6 | **Extract Vector Geometry** | Multi-agent ensemble extraction of zones, buildings and boundaries (uses constraints as context) |
 | 7 | **Generate Volumes** | Floor-by-floor 3D massing with plinths and underground parking |
 | 8 | **Validation Report** | Summary and cross-validation of all pipeline outputs |
 | 9 | **Export Package** | Rhino .3dm export with sublayer hierarchy and User Attributes (DXF fallback) |
 
-### Multi-Agent Ensemble Extraction (Node 5)
+### Multi-Agent Ensemble Extraction (Node 6)
 
 The vector geometry extraction uses a **multi-agent ensemble** architecture:
 
@@ -149,7 +149,7 @@ The vector geometry extraction uses a **multi-agent ensemble** architecture:
 | `site_brief_analyzer` | Pre-analysis: regex + AI extraction of GFA, zones, typologies → binding rules |
 | `pipeline_stages` | Node 3 (Extract Programme) and Node 4 (Detect Units) stage orchestration |
 | `ai_vision_classifier` | Single-pass Gemini Vision classification (used within the ensemble's Visual Agent) |
-| `constraint_extractor` | Regex + AI extraction of regulatory constraints with setback/height geometry generation |
+| `constraint_extractor` | Regex + AI extraction of regulatory constraints with per-zone rule mapping and setback/height geometry |
 | `programme_extractor` | Building programme extraction (GFA, uses, floors) with AI gap-fill from constraints |
 | `volume_generator` | Floor-by-floor 3D volume extrusion from footprints + programme data |
 | `rhino_exporter` | .3dm export with sublayer hierarchy (`Parent::Child`) and Rhino User Attributes per object |
@@ -172,7 +172,7 @@ SpatialBrief/
 │   │   │   ├── rhino_exporter.py             # .3dm / .dxf export with sublayers + UserStrings
 │   │   │   └── ai_zone_validator.py          # Post-extraction AI zone validation
 │   │   ├── vector_ingestion/                 # Geometry extraction pipeline
-│   │   │   ├── pdf_vector_extractor.py       # 6-stage PDF path → polygon pipeline (Node 5)
+│   │   │   ├── pdf_vector_extractor.py       # 6-stage PDF path → polygon pipeline (Node 6)
 │   │   │   ├── ensemble_classifier.py        # Multi-agent ensemble (3 specialists + judge)
 │   │   │   ├── site_brief_analyzer.py        # Site brief generation (regex + AI)
 │   │   │   ├── pipeline_stages.py            # Node 3 + Node 4 stage functions
@@ -214,7 +214,7 @@ SpatialBrief/
 | Backend | FastAPI + Uvicorn (Python) |
 | AI | Google Gemini (vision + text) via `google-genai` SDK |
 | Geometry | Shapely + PyMuPDF + ezdxf |
-| Export | ezdxf (DXF) + rhino3dm (optional .3dm with sublayers & User Attributes) |
+| Export | ezdxf (DXF fallback) + rhino3dm (.3dm with sublayers & User Attributes) |
 | Styling | Vanilla CSS with dark-mode design system |
 
 ## License

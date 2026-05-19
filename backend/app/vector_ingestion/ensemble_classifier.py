@@ -140,8 +140,8 @@ def _get_client(api_key):
     )
 
 
-def _call_gemini(client, model_name, content_parts):
-    """Call Gemini and return parsed JSON list."""
+def _call_gemini(client, model_name, content_parts, cost_tracker=None, stage=""):
+    """Call Gemini and return parsed JSON list. Optionally tracks cost."""
     from google.genai import types
     response = client.models.generate_content(
         model=model_name,
@@ -150,6 +150,8 @@ def _call_gemini(client, model_name, content_parts):
             response_mime_type="application/json",
         ),
     )
+    if cost_tracker is not None:
+        cost_tracker.add(response, model_name, stage=stage)
     return _parse_json_response(response.text)
 
 
@@ -199,7 +201,7 @@ When in doubt between building and zone, ALWAYS choose "sub_zone".
 
 def _run_visual_agent(
     client, model_name, polygons, clean_img, annotated_img, crop_imgs,
-    site_brief_text="",
+    site_brief_text="", cost_tracker=None,
 ) -> List[Dict]:
     """Agent 1: Visual analysis using rendered images."""
     from google.genai import types
@@ -214,7 +216,7 @@ def _run_visual_agent(
     parts.append(prompt)
 
     log.info("[Ensemble/Visual] Calling %s with %d images...", model_name, len(parts) - 1)
-    return _call_gemini(client, model_name, parts)
+    return _call_gemini(client, model_name, parts, cost_tracker=cost_tracker, stage="ensemble_visual")
 
 
 # ── Agent 2: Geometric Analyst ──────────────────────────────────
@@ -250,11 +252,11 @@ Classify ALL {len(manifest)} polygons.
 """
 
 
-def _run_geometric_agent(client, model_name, manifest, page_area, site_brief_text="") -> List[Dict]:
+def _run_geometric_agent(client, model_name, manifest, page_area, site_brief_text="", cost_tracker=None) -> List[Dict]:
     """Agent 2: Pure geometric/metric analysis."""
     prompt = _build_geometric_prompt(manifest, page_area, site_brief_text)
     log.info("[Ensemble/Geometric] Calling %s with %d polygons...", model_name, len(manifest))
-    return _call_gemini(client, model_name, [prompt])
+    return _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_geometric")
 
 
 # ── Agent 3: Contextual Analyst ─────────────────────────────────
@@ -353,11 +355,11 @@ Classify ALL {len(context_data)} polygons.
 """
 
 
-def _run_contextual_agent(client, model_name, context_data, site_brief_text="") -> List[Dict]:
+def _run_contextual_agent(client, model_name, context_data, site_brief_text="", cost_tracker=None) -> List[Dict]:
     """Agent 3: Text/color/context analysis."""
     prompt = _build_contextual_prompt(context_data, site_brief_text)
     log.info("[Ensemble/Contextual] Calling %s with %d polygons...", model_name, len(context_data))
-    return _call_gemini(client, model_name, [prompt])
+    return _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_contextual")
 
 
 # ── Judge Agent ─────────────────────────────────────────────────
@@ -411,11 +413,11 @@ You MUST classify ALL {n_polygons} polygons.
 """
 
 
-def _run_judge_agent(client, model_name, n_polygons, visual, geometric, contextual, manifest, site_brief_text="") -> List[Dict]:
+def _run_judge_agent(client, model_name, n_polygons, visual, geometric, contextual, manifest, site_brief_text="", cost_tracker=None) -> List[Dict]:
     """Judge: merge and resolve conflicts."""
     prompt = _build_judge_prompt(n_polygons, visual, geometric, contextual, manifest, site_brief_text)
     log.info("[Ensemble/Judge] Calling %s to merge %d polygon classifications...", model_name, n_polygons)
-    return _call_gemini(client, model_name, [prompt])
+    return _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_judge")
 
 
 # ── Ensemble Orchestrator ───────────────────────────────────────
@@ -431,6 +433,7 @@ def classify_polygons_ensemble(
     model_contextual: Optional[str] = None,
     model_judge: Optional[str] = None,
     site_brief: Optional[Dict[str, Any]] = None,
+    cost_tracker: Any = None,
 ) -> List[Dict[str, Any]]:
     """
     Classify polygons using 3 concurrent specialist agents + 1 judge.
@@ -509,15 +512,15 @@ def classify_polygons_ensemble(
                 executor.submit(
                     _run_visual_agent, client, m_visual,
                     polygons, clean_img, annotated_img, crop_imgs,
-                    brief_text,
+                    brief_text, cost_tracker,
                 ): "Visual",
                 executor.submit(
                     _run_geometric_agent, client, m_geometric,
-                    manifest, page_area, brief_text,
+                    manifest, page_area, brief_text, cost_tracker,
                 ): "Geometric",
                 executor.submit(
                     _run_contextual_agent, client, m_contextual,
-                    context_data, brief_text,
+                    context_data, brief_text, cost_tracker,
                 ): "Contextual",
             }
             results_map: Dict[str, Any] = {}
@@ -561,7 +564,7 @@ def classify_polygons_ensemble(
                 judge_results = _run_judge_agent(
                     client, m_judge, len(polygons),
                     visual_res, geometric_res, contextual_res, manifest,
-                    brief_text,
+                    brief_text, cost_tracker,
                 )
                 log.info("[Ensemble/Judge] Returned %d final classifications", len(judge_results))
             except Exception as e:
@@ -584,6 +587,7 @@ def classify_polygons_ensemble(
             try:
                 _resolve_spatial_conflicts(
                     polygons, conflicts, client, m_judge, manifest, page_area,
+                    cost_tracker=cost_tracker,
                 )
             except Exception as e:
                 log.error("[Ensemble/Resolver] Failed: %s — applying rule-based fallback", e)
@@ -774,11 +778,11 @@ as "sub_zone", do NOT include it in the output.
 """
 
 
-def _resolve_spatial_conflicts(polygons, conflicts, client, model_name, manifest, page_area):
+def _resolve_spatial_conflicts(polygons, conflicts, client, model_name, manifest, page_area, cost_tracker=None):
     """Run the conflict resolver AI agent."""
     prompt = _build_resolver_prompt(conflicts, manifest, page_area)
     log.info("[Ensemble/Resolver] Calling %s to resolve %d conflicts...", model_name, len(conflicts))
-    results = _call_gemini(client, model_name, [prompt])
+    results = _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_resolver")
     log.info("[Ensemble/Resolver] Returned %d reclassifications", len(results))
 
     reclassified = 0
@@ -1017,6 +1021,39 @@ def _enforce_hard_rules(polygons, page_area):
                     p["_ai_reason"] = "hard_rule: compact polygon inside buildable_envelope"
                     log.info("[Ensemble] Hard rule: polygon %s → sub_zone (inside buildable_envelope)",
                              p.get("id", "?"))
+
+    # Rule: sub_zone containing other sub_zones → plinth
+    # A plinth is a large footprint with smaller buildings on top.
+    sub_zones = [p for p in polygons if p.get("_ai_zone_type") == "sub_zone"]
+    if len(sub_zones) > 1:
+        for outer in sub_zones:
+            outer_sp = outer.get("shapely_poly")
+            if not outer_sp:
+                continue
+            inner_count = 0
+            for inner in sub_zones:
+                if inner is outer:
+                    continue
+                inner_sp = inner.get("shapely_poly")
+                if not inner_sp:
+                    continue
+                # Check containment: outer fully contains inner
+                try:
+                    if outer_sp.contains(inner_sp) or (
+                        outer_sp.intersection(inner_sp).area > inner_sp.area * 0.8
+                    ):
+                        inner_count += 1
+                except Exception:
+                    continue
+            if inner_count >= 1:
+                log.info("[Ensemble] Plinth detected: polygon %s contains %d sub_zones → reclassifying as plinth",
+                         outer.get("id", "?"), inner_count)
+                outer["_ai_zone_type"] = "plinth"
+                outer["_ai_confidence"] = max(outer.get("_ai_confidence", 0), 0.80)
+                outer["_ai_reason"] = (
+                    outer.get("_ai_reason", "") +
+                    f" [plinth: contains {inner_count} buildings]"
+                )
 
 
 def _cleanup_temp_keys(polygons):

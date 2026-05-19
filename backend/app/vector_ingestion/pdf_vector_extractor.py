@@ -1406,6 +1406,7 @@ def extract_vectors_from_pdf(
     site_brief: Optional[Dict[str, Any]] = None,
     text_blocks: Optional[List[Dict[str, Any]]] = None,
     units_info: Optional[Dict[str, Any]] = None,
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """
     Node 5 — Extract Vector Geometry.
@@ -1483,9 +1484,11 @@ def extract_vectors_from_pdf(
         # site_brief is injected from Node 3 (Extract Programme)
         classification_mode = "rule_based"
         ai_error_detail = None
+        log.info("Stage AI: gemini_api_key=%s", "present" if gemini_api_key else "MISSING")
         if gemini_api_key:
             log.info("Stage AI: Running multi-agent ensemble classification...")
-            log.info("Stage AI: API key present (first 8 chars: %s...)", gemini_api_key[:8])
+            log.info("Stage AI: API key (first 8 chars: %s...), model=%s",
+                     gemini_api_key[:8], gemini_model or "default")
             resolved_model = gemini_model or "gemini-2.5-flash"
 
             if site_brief:
@@ -1503,6 +1506,7 @@ def extract_vectors_from_pdf(
                     model_contextual=am.get("contextual"),
                     model_judge=am.get("judge"),
                     site_brief=site_brief,
+                    cost_tracker=cost_tracker,
                 )
                 # Check if SDK was missing (not an API error, just not installed)
                 if any(p.get("_ai_sdk_missing") for p in polys):
@@ -1560,6 +1564,39 @@ def extract_vectors_from_pdf(
 
         # Promote nested subzones (inner same-type → sub_zone)
         deduped = _promote_nested_subzones(deduped)
+
+        # ── Plinth detection ──
+        # A sub_zone that geometrically contains other sub_zones is a plinth
+        # (a large podium with smaller buildings on top)
+        sub_zones = [z for z in deduped if z.get("zone_type") == "sub_zone" and z.get("closed")]
+        if len(sub_zones) > 1:
+            for outer in sub_zones:
+                outer_sp = outer.get("shapely_poly")
+                if not outer_sp:
+                    continue
+                inner_count = 0
+                for inner in sub_zones:
+                    if inner is outer:
+                        continue
+                    inner_sp = inner.get("shapely_poly")
+                    if not inner_sp:
+                        continue
+                    try:
+                        if outer_sp.contains(inner_sp) or (
+                            outer_sp.intersection(inner_sp).area > inner_sp.area * 0.8
+                        ):
+                            inner_count += 1
+                    except Exception:
+                        continue
+                if inner_count >= 1:
+                    log.info("[Plinth] Detected: polygon %s contains %d sub_zones → reclassifying as plinth",
+                             outer.get("id", "?"), inner_count)
+                    outer["zone_type"] = "plinth"
+                    outer["confidence"] = max(outer.get("confidence", 0), 0.80)
+                    outer["classification_method"] = (
+                        outer.get("classification_method", "") +
+                        f"+plinth({inner_count}_buildings)"
+                    )
 
         # Stage 6: text-based enrichment before filtering
         deduped = _enrich_with_text(deduped, page)

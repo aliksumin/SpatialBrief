@@ -8,5 +8,4 @@ google-genai
 openai
 PyMuPDF
 shapely
-# Optional: enables native .3dm export (requires Python <= 3.13)
-# rhino3dm
+rhino3dm

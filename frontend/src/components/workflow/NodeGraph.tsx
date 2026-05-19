@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Upload, Check, FileText, Loader, Play, AlertTriangle, XCircle, Download, Activity } from 'lucide-react';
+import { Upload, Check, FileText, Loader, Play, AlertTriangle, XCircle, Download, Activity, DollarSign } from 'lucide-react';
 
 interface NodeGraphProps {
   onFilesUploaded: (data: any) => void;
@@ -16,10 +16,10 @@ const NODES = [
   { id: 2, title: 'Classify Documents', desc: 'Determine file roles via AI', metrics: { roles: 2, conf: '98%' } },
   { id: 3, title: 'Extract Programme', desc: 'Programme, GFA targets, metadata — formulate extraction tasks', metrics: { labels: 0, buildings: 0, uses: 0 } },
   { id: 4, title: 'Detect Units & Coordinates', desc: 'Detect drawing scale, units and origin point', metrics: { unit: 'meters', crs: 'Local' } },
-  { id: 5, title: 'Extract Vector Geometry', desc: 'Multi-agent ensemble extraction of zones, buildings and boundaries', metrics: { polygons: 0, open: 0, layers: 0 } },
-  { id: 6, title: 'Extract Constraints', desc: 'AI-powered setback, height & rule extraction', metrics: { constraints: 0, ai_sourced: 0 } },
+  { id: 5, title: 'Extract Constraints', desc: 'AI-powered setback, height, density & GFA rule extraction', metrics: { constraints: 0, ai_sourced: 0 } },
+  { id: 6, title: 'Extract Vector Geometry', desc: 'Multi-agent ensemble extraction of zones, buildings and boundaries', metrics: { polygons: 0, open: 0, layers: 0 } },
   { id: 7, title: 'Generate Volumes', desc: '3D floor-by-floor volumes, plinths & parking', metrics: { volumes: 0, floors: 0 } },
-  { id: 8, title: 'Validation Report', desc: 'Summary of process', metrics: {} },
+  { id: 8, title: 'Validation Report', desc: 'Summary of process and cost', metrics: { calls: 0, tokens: 0, cost: '$0.00' } },
   { id: 9, title: 'Export Package', desc: 'Rhino .3dm with sublayer hierarchy & User Attributes', metrics: {} }
 ];
 
@@ -80,7 +80,7 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
     if(onNodeChange) onNodeChange(2);
     await new Promise(r => setTimeout(r, 400));
 
-    // Node 3: Extract Programme — triggers the full /process call
+    // Node 3: Start processing — stream progress from backend
     if(onNodeChange) onNodeChange(3);
 
     try {
@@ -99,7 +99,7 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       if (agentJudge) headers['X-Agent-Judge-Model'] = agentJudge;
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 300_000);
+      const timeoutId = setTimeout(() => controller.abort(), 600_000);
 
       let response: Response;
       try {
@@ -118,30 +118,55 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
         throw new Error(`Server error ${response.status}: ${errText.slice(0, 200)}`);
       }
 
-      const result = await response.json();
+      // Read NDJSON stream — each line is {"node": N, "result": {...}}
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      // Pipeline data received — step through nodes
-      // Node 3 done: programme + metadata extracted
-      onFilesUploaded(result);
-      await new Promise(r => setTimeout(r, 500));
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      // Node 4: Detect Units & Coordinates
-      if(onNodeChange) onNodeChange(4);
-      await new Promise(r => setTimeout(r, 400));
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop()!; // keep incomplete trailing line
 
-      // Node 5: Extract Vector Geometry (multi-agent ensemble)
-      if(onNodeChange) onNodeChange(5);
-      await new Promise(r => setTimeout(r, 500));
-
-      // Nodes 6–9: Extract Constraints → Generate Volumes → Validation → Export
-      for (let i = 6; i <= 9; i++) {
-        if(onNodeChange) onNodeChange(i);
-        await new Promise(r => setTimeout(r, 400));
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.node === 'done') {
+              // Pipeline complete — advance to Export
+              if(onNodeChange) onNodeChange(9);
+            } else if (typeof event.node === 'number' && event.result) {
+              // Node completed — show its data immediately
+              onFilesUploaded(event.result);
+              // Advance to the NEXT node (current one is done)
+              if(onNodeChange) onNodeChange(event.node + 1);
+            }
+          } catch (parseErr) {
+            console.warn('Failed to parse stream event:', line, parseErr);
+          }
+        }
       }
+
+      // Process any remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          if (event.result) onFilesUploaded(event.result);
+          if (event.node === 'done') {
+            if(onNodeChange) onNodeChange(9);
+          } else if (typeof event.node === 'number') {
+            if(onNodeChange) onNodeChange(event.node + 1);
+          }
+        } catch {}
+      }
+
     } catch (error: any) {
       console.error('Pipeline processing failed:', error);
       if (error?.name === 'AbortError') {
-        alert('Processing timed out (300s). The AI analysis may be taking too long.\n\nTry:\n• Processing without an API key (rule-based mode)\n• Uploading a smaller document');
+        alert('Processing timed out (600s). The AI analysis may be taking too long.\n\nTry:\n• Using a faster model (e.g. gemini-2.5-flash)\n• Processing without an API key (rule-based mode)\n• Uploading a smaller document');
       } else {
         alert(`Processing failed: ${error?.message || 'Unknown error'}.\nCheck if the backend is running.`);
       }
@@ -290,6 +315,17 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                       if (node.id === 7 && k === 'floors') {
                         displayValue = String(vols.filter((v: any) => v.zone_type === 'building_floor').length);
                       }
+                      // Node 8 — Validation Report (Cost)
+                      const costData = geo?.cost_summary || extractionData?.cost_summary;
+                      if (node.id === 8 && k === 'calls') displayValue = String(costData?.total_calls || 0);
+                      if (node.id === 8 && k === 'tokens') {
+                        const t = costData?.total_tokens || 0;
+                        displayValue = t > 1000 ? `${(t/1000).toFixed(1)}k` : String(t);
+                      }
+                      if (node.id === 8 && k === 'cost') {
+                        const c = costData?.estimated_cost_usd || 0;
+                        displayValue = c > 0 ? `$${c.toFixed(4)}` : '$0.00';
+                      }
                     }
                     return (
                       <div key={k} style={{ background: 'rgba(255,255,255,0.03)', padding: '0.15rem 0.4rem', borderRadius: '4px', fontSize: '0.65rem', color: 'var(--text-secondary)', border: '1px solid rgba(255,255,255,0.04)' }}>
@@ -311,6 +347,48 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                   <XCircle size={14} /> {(node as any).error}
                 </div>
               )}
+
+              {/* Node 8 — Cost breakdown */}
+              {node.id === 8 && isDone && (() => {
+                const costData = (extractionData?.geometry || extractionData)?.cost_summary || extractionData?.cost_summary;
+                if (!costData || !costData.calls || costData.calls.length === 0) return null;
+                return (
+                  <div style={{
+                    marginTop: '0.75rem', padding: '0.6rem',
+                    background: 'rgba(16,185,129,0.04)', borderRadius: '8px',
+                    border: '1px solid rgba(16,185,129,0.12)'
+                  }}>
+                    <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginBottom: '0.4rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      <DollarSign size={10} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '0.2rem' }} />
+                      Cost Breakdown
+                    </div>
+                    {costData.calls.map((call: any, i: number) => (
+                      <div key={i} style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        fontSize: '0.6rem', color: 'var(--text-secondary)',
+                        padding: '0.15rem 0', borderBottom: i < costData.calls.length - 1 ? '1px solid rgba(255,255,255,0.03)' : 'none'
+                      }}>
+                        <span style={{ opacity: 0.7 }}>{call.stage.replace(/_/g, ' ')}</span>
+                        <span style={{ fontFamily: 'monospace', fontSize: '0.6rem' }}>
+                          {call.input_tokens + call.output_tokens > 1000
+                            ? `${((call.input_tokens + call.output_tokens)/1000).toFixed(1)}k tok`
+                            : `${call.input_tokens + call.output_tokens} tok`
+                          }
+                        </span>
+                      </div>
+                    ))}
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      marginTop: '0.4rem', paddingTop: '0.4rem',
+                      borderTop: '1px solid rgba(16,185,129,0.15)',
+                      fontSize: '0.7rem', fontWeight: 600, color: '#10b981'
+                    }}>
+                      <span>Total</span>
+                      <span>${costData.estimated_cost_usd?.toFixed(4) || '0.0000'}</span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Node 1 Upload Action */}
               {node.id === 1 && !isDone && isActive && (

@@ -11,6 +11,7 @@ stages matching the 9-node architecture:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
@@ -20,44 +21,105 @@ log = logging.getLogger(__name__)
 # Node 3 — Extract Programme
 # ────────────────────────────────────────────────────────────────────
 
+def _is_relevant_image_block(block, page_area: float) -> bool:
+    """
+    Quick pre-screen: does this image block likely contain valuable
+    spatial / regulatory data (site plan, diagram, table with GFA)?
+
+    Returns False for tiny icons, logos, decorative images, and
+    very large full-page backgrounds. Only True for mid-sized images
+    that are likely to be diagrams or site plans.
+    """
+    # block format: (x0, y0, x1, y1, image_data, block_no, block_type)
+    # block_type == 1 means image block
+    if len(block) < 7 or block[6] != 1:
+        return False
+
+    x0, y0, x1, y1 = block[0], block[1], block[2], block[3]
+    w = x1 - x0
+    h = y1 - y0
+    area = w * h
+
+    # Skip tiny images (icons, bullets, logos) — less than 1% of page
+    if area < page_area * 0.01:
+        return False
+
+    # Skip full-page background images — more than 90% of page
+    if area > page_area * 0.90:
+        return False
+
+    # Skip very narrow strips (decorative borders, lines)
+    aspect = max(w, h) / max(min(w, h), 1)
+    if aspect > 15:
+        return False
+
+    return True
+
+
 def run_extract_programme(
     page,
     page_area: float,
-    existing_polys: List[Dict[str, Any]],
     api_key: Optional[str] = None,
     model_name: str = "gemini-2.5-flash",
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """
-    Stage 3: Extract all text-based metadata, programme info, and produce
-    the site brief that guides downstream vector extraction.
+    Stage 3: Extract all text-based metadata and programme info, and
+    produce the site brief that guides downstream vector extraction.
+
+    This is a FAST stage — it works from text only.
+    No heavy polygon reconstruction; no image rendering.
+    Image blocks are pre-screened and only counted (not sent to AI).
 
     Returns:
         text_blocks:  list of {text, bbox, source}
         site_brief:   structured brief (zones, GFA targets, typology, rules)
+        image_count:  number of relevant images detected (for info)
     """
-    from app.vector_ingestion.site_brief_analyzer import generate_site_brief
+    t0 = time.time()
 
-    # Extract raw text blocks from the page
+    # ── Extract text blocks (instant — local PDF parsing) ──
     raw_blocks = page.get_text("blocks")
-    text_blocks = [
-        {"text": tb[4].strip(), "source": "page_text",
-         "bbox": [tb[0], tb[1], tb[2], tb[3]]}
-        for tb in raw_blocks
-        if tb[6] == 0 and tb[4].strip()
-    ]
+    text_blocks = []
+    image_count = 0
+    relevant_images = 0
 
-    log.info("[Node3] Extracted %d text blocks from page", len(text_blocks))
+    for tb in raw_blocks:
+        if tb[6] == 0 and tb[4].strip():
+            # Text block
+            text_blocks.append({
+                "text": tb[4].strip(),
+                "source": "page_text",
+                "bbox": [tb[0], tb[1], tb[2], tb[3]],
+            })
+        elif tb[6] == 1:
+            # Image block — pre-screen for relevance
+            image_count += 1
+            if _is_relevant_image_block(tb, page_area):
+                relevant_images += 1
 
-    # Generate site brief — regulatory analysis + AI enrichment
+    log.info("[Node3] Extracted %d text blocks, %d images (%d relevant) in %.1fs",
+             len(text_blocks), image_count, relevant_images,
+             time.time() - t0)
+
+    # ── Generate site brief — text-only, no geometry needed ──
+    # The site brief only needs text data to extract programme info.
+    # Heavy geometry analysis happens in Node 5.
     site_brief = None
     if api_key:
+        from app.vector_ingestion.site_brief_analyzer import generate_site_brief
         try:
+            t1 = time.time()
             site_brief = generate_site_brief(
-                text_blocks, existing_polys, page_area,
+                text_blocks,
+                [],   # No polygons needed — keep this stage fast
+                page_area,
                 api_key=api_key,
                 model_name=model_name,
+                cost_tracker=cost_tracker,
             )
-            log.info("[Node3] Site brief: %d zones, %d buildings expected, typology=%s",
+            log.info("[Node3] Site brief generated in %.1fs: %d zones, %d buildings, typology=%s",
+                     time.time() - t1,
                      site_brief.get("expected_buildable_zones", 0),
                      site_brief.get("expected_building_count", 0),
                      site_brief.get("dominant_typology", "?"))
@@ -65,23 +127,25 @@ def run_extract_programme(
             log.warning("[Node3] Site brief generation failed: %s — continuing without", e)
             site_brief = None
     else:
-        log.info("[Node3] No API key — skipping AI site brief, regex-only fallback")
-        from app.vector_ingestion.site_brief_analyzer import _extract_brief_regex, _count_visual_zones
+        log.info("[Node3] No API key — regex-only site brief")
+        from app.vector_ingestion.site_brief_analyzer import _extract_brief_regex
         regex_brief = _extract_brief_regex(text_blocks)
-        zone_analysis = _count_visual_zones(existing_polys, page_area)
         site_brief = {
-            "expected_buildable_zones": regex_brief.get("expected_zone_count") or max(len(zone_analysis.get("large_filled_zones", [])), 1),
-            "expected_building_count": regex_brief.get("expected_building_count") or max(zone_analysis.get("building_candidates", 0), 1),
+            "expected_buildable_zones": regex_brief.get("expected_zone_count") or 1,
+            "expected_building_count": regex_brief.get("expected_building_count") or 1,
             "dominant_typology": regex_brief["typologies"][0] if regex_brief.get("typologies") else "apartment_block",
             "site_gfa_target": max(regex_brief["gfa_values"]) if regex_brief.get("gfa_values") else None,
             "max_height": max(regex_brief["height_values"]) if regex_brief.get("height_values") else None,
             "typologies_detected": regex_brief.get("typologies", []),
-            "geometry_analysis": zone_analysis,
         }
+
+    log.info("[Node3] Total time: %.1fs", time.time() - t0)
 
     return {
         "text_blocks": text_blocks,
         "site_brief": site_brief,
+        "image_count": image_count,
+        "relevant_images": relevant_images,
     }
 
 

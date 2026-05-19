@@ -254,6 +254,7 @@ def _extract_with_ai(
     regex_data: Dict[str, Any],
     api_key: str,
     model_name: str,
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """Use Gemini to extract structured programme data from all context."""
     try:
@@ -356,6 +357,8 @@ Return ONLY valid JSON:
                 response_mime_type="application/json",
             ),
         )
+        if cost_tracker is not None:
+            cost_tracker.add(response, model_name, stage="programme_extraction")
 
         text = response.text.strip()
         if "```json" in text:
@@ -509,6 +512,7 @@ def extract_programme(
     constraints: List[Dict[str, Any]],
     api_key: Optional[str] = None,
     model_name: str = "gemini-2.5-flash",
+    cost_tracker=None,
 ) -> Dict[str, Any]:
     """
     Extract building programme from text blocks, zones, and constraints.
@@ -536,6 +540,7 @@ def extract_programme(
     if api_key:
         ai_data = _extract_with_ai(
             text_blocks, zones, constraints, regex_data, api_key, model_name,
+            cost_tracker=cost_tracker,
         )
 
     # Step 3: Build per-building programme entries
