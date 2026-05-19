@@ -778,18 +778,20 @@ def generate_volumes(
         env_pts = env.get("points", [])
         if len(env_pts) < 3:
             continue
+        is_3d = len(env_pts[0]) >= 3
         cx = sum(p[0] for p in env_pts) / len(env_pts)
-        cy = sum(p[1] for p in env_pts) / len(env_pts)
+        cz = sum(p[2] for p in env_pts) / len(env_pts) if is_3d else sum(p[1] for p in env_pts) / len(env_pts)
         zone_num = idx + 1
         zone_label = env.get("zone_label", f"Zone {zone_num}")
+        centroid = [round(cx, 4), 0, round(cz, 4)] if is_3d else [round(cx, 4), round(cz, 4)]
         annotations.append({
             "id": f"annot_zone_{env.get('id', idx)}",
             "type": "annotation",
             "zone_type": "zone_annotation",
             "zone_label": f"Z{zone_num}",
             "annotation_text": f"Z{zone_num}: {zone_label}",
-            "points": [[cx, cy]],
-            "centroid": [cx, cy],
+            "points": [centroid],
+            "centroid": centroid,
             "closed": False,
             "filled": False,
             "color_hint": "#22c55e",
