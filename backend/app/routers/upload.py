@@ -114,6 +114,7 @@ async def run_pipeline(request: Request):
                 "volumes": volume_result.get("volumes", []),
                 "volume_summary": volume_result.get("volume_summary", {}),
                 "zone_rules": constraint_result.get("zone_rules", []),
+                "zone_programmes": programme_result.get("zone_programmes", []),
                 "cost_summary": cost_tracker.summary(),
             }
             if extra:
@@ -265,6 +266,7 @@ async def run_pipeline(request: Request):
                 api_key=api_key,
                 model_name=resolved_model,
                 cost_tracker=cost_tracker,
+                site_brief=site_brief,
             ),
         )
         if api_key:
@@ -278,10 +280,16 @@ async def run_pipeline(request: Request):
             constraints=constraint_result.get("constraints", []),
             site_brief=site_brief,
             zone_rules=constraint_result.get("zone_rules", []),
+            zone_programmes=programme_result.get("zone_programmes", []),
         )
         volume_geometry = volume_result.get("volumes", [])
         extracted_geometry.extend(volume_geometry)
         total_objects += len(volume_geometry)
+
+        # Add zone annotation tags
+        annotation_geometry = volume_result.get("annotations", [])
+        extracted_geometry.extend(annotation_geometry)
+        total_objects += len(annotation_geometry)
 
         yield _safe_json({"node": 7, "result": snapshot()}) + "\n"
 

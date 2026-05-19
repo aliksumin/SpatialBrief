@@ -168,39 +168,49 @@ export default function App() {
           </>
         )}
 
-        {/* Node 3: Extract Metadata */}
+        {/* Node 3: Extract Programme — Zone Programme Table */}
         {selectedNode === 3 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
-              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>METADATA</span>
-              Extracted Text &amp; Annotations
+              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>PROGRAMME</span>
+              Zone Programme Analysis
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
-              <div>
-                <div className="data-card-value" style={{ fontSize: '2rem', color: '#3b82f6' }}>{data.source_files?.length || 0}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Source Documents</div>
-              </div>
-              <div>
-                <div className="data-card-value" style={{ fontSize: '2rem', color: '#22c55e' }}>{data.extracted_text?.length || 0}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Text Blocks Extracted</div>
-              </div>
-            </div>
-            {data.extracted_text && data.extracted_text.length > 0 && (
-              <div style={{ marginTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '1rem', maxHeight: '200px', overflowY: 'auto' }}>
-                <h4 style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>Parsed Text Blocks</h4>
-                {data.extracted_text.map((item: any, i: number) => (
-                  <div key={i} style={{ background: 'rgba(0,0,0,0.2)', padding: '0.6rem 0.8rem', borderRadius: '6px', marginBottom: '0.4rem', fontSize: '0.8rem' }}>
-                    <div style={{ color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>{item.text}</div>
-                    <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                      Source: {item.source} {item.layer ? `· Layer: ${item.layer}` : ''}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {(!data.extracted_text || data.extracted_text.length === 0) && (
-              <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No text metadata extracted from the uploaded documents.</div>
-            )}
+            {(() => {
+              const zp = data.zone_programmes || [];
+              const thS: React.CSSProperties = { padding: '0.5rem 0.6rem', textAlign: 'left', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)', borderBottom: '1px solid rgba(255,255,255,0.1)' };
+              const tdS: React.CSSProperties = { padding: '0.45rem 0.6rem', fontSize: '0.8rem', borderBottom: '1px solid rgba(255,255,255,0.05)' };
+              const badge = (src: string) => {
+                const m: Record<string, [string, string]> = { document: ['rgba(59,130,246,0.2)', '#60a5fa'], proportional: ['rgba(34,197,94,0.15)', '#4ade80'], derived_from_gfa: ['rgba(245,158,11,0.15)', '#fbbf24'], inferred: ['rgba(239,68,68,0.15)', '#f87171'], ai_extracted: ['rgba(139,92,246,0.2)', '#a78bfa'], default: ['rgba(148,163,184,0.15)', '#94a3b8'] };
+                const [bg, fg] = m[src] || ['rgba(148,163,184,0.15)', '#94a3b8'];
+                return <span style={{ fontSize: '0.6rem', background: bg, color: fg, padding: '0.15rem 0.4rem', borderRadius: '4px' }}>{src.replace('_', ' ')}</span>;
+              };
+              if (zp.length === 0) return <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Programme data will appear after processing.</div>;
+              return (
+                <div style={{ marginTop: '1rem', overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead><tr>
+                      <th style={thS}>#</th><th style={thS}>Zone</th><th style={thS}>Typology</th><th style={thS}>Use</th>
+                      <th style={thS}>Target GFA</th><th style={thS}>Max Height</th><th style={thS}>Parking</th><th style={thS}>Buildings</th><th style={thS}>Source</th>
+                    </tr></thead>
+                    <tbody>
+                      {zp.map((z: any, i: number) => (
+                        <tr key={i}>
+                          <td style={{ ...tdS, fontWeight: 700, color: '#22c55e' }}>{z.zone_index + 1}</td>
+                          <td style={{ ...tdS, color: 'var(--text-primary)', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{z.zone_label || `Zone ${z.zone_index + 1}`}</td>
+                          <td style={tdS}><span style={{ color: '#8b5cf6', fontWeight: 600 }}>{z.typology?.replace(/_/g, ' ')}</span></td>
+                          <td style={{ ...tdS, color: 'var(--text-primary)' }}>{z.use?.replace(/_/g, ' ')}</td>
+                          <td style={tdS}>{z.target_gfa_m2 ? <><span style={{ color: '#3b82f6', fontWeight: 600 }}>{z.target_gfa_m2.toLocaleString()} m²</span>{' '}{badge(z.gfa_source || z.source || 'inferred')}</> : <span style={{ color: 'var(--text-secondary)' }}>—</span>}</td>
+                          <td style={tdS}>{z.max_height_m ? <><span style={{ color: '#f59e0b' }}>{z.max_height_m}m</span>{' '}{badge(z.height_source || z.source || 'inferred')}</> : '—'}</td>
+                          <td style={tdS}>{z.parking_levels > 0 ? <span style={{ color: '#22c55e' }}>✓ {z.parking_levels}L</span> : <span style={{ color: 'var(--text-secondary)' }}>—</span>}</td>
+                          <td style={{ ...tdS, textAlign: 'center' }}>{z.expected_buildings || '—'}</td>
+                          <td style={tdS}>{badge(z.source || 'inferred')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -223,21 +233,45 @@ export default function App() {
           </div>
         )}
 
-        {/* Node 5: Drawing Areas Separation */}
+        {/* Node 5: Extract Constraints — Per-zone table */}
         {selectedNode === 5 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
-              Drawing Areas Identification
+              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>CONSTRAINTS</span>
+              Per-Zone Regulatory Constraints
             </div>
-            <div style={{ marginTop: '1rem' }}>
-              <div className="data-card-value">Essential Zones Analyzed</div>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>Ready for extraction</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <span className="data-tag" style={{ background: 'rgba(59, 130, 246, 0.15)', borderColor: '#3b82f6', color: '#60a5fa' }}>Plot Boundary</span>
-                <span className="data-tag" style={{ background: 'rgba(239, 68, 68, 0.15)', borderColor: '#ef4444', color: '#f87171' }}>Buildable Envelope</span>
-                <span className="data-tag" style={{ background: 'rgba(245, 158, 11, 0.15)', borderColor: '#f59e0b', color: '#fbbf24' }}>No-Build Zone</span>
-              </div>
-            </div>
+            {(() => {
+              const constraints = data.constraints || [];
+              const thS: React.CSSProperties = { padding: '0.5rem 0.6rem', textAlign: 'left', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)', borderBottom: '1px solid rgba(255,255,255,0.1)' };
+              const tdS: React.CSSProperties = { padding: '0.45rem 0.6rem', fontSize: '0.8rem', borderBottom: '1px solid rgba(255,255,255,0.05)' };
+              const catColors: Record<string, string> = { height: '#3b82f6', setback: '#22c55e', density: '#f59e0b', parking: '#f97316', gfa: '#06b6d4', other: '#94a3b8' };
+              const badge = (src: string) => {
+                const m: Record<string, [string, string]> = { regex: ['rgba(59,130,246,0.2)', '#60a5fa'], ai_extracted: ['rgba(139,92,246,0.2)', '#a78bfa'], ai_suggested: ['rgba(245,158,11,0.2)', '#fbbf24'] };
+                const [bg, fg] = m[src] || ['rgba(148,163,184,0.15)', '#94a3b8'];
+                return <span style={{ fontSize: '0.6rem', background: bg, color: fg, padding: '0.15rem 0.4rem', borderRadius: '4px' }}>{src?.replace('_', ' ') || 'document'}</span>;
+              };
+              if (constraints.length === 0) return <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Constraint data will appear after processing.</div>;
+              return (
+                <div style={{ marginTop: '1rem', maxHeight: '360px', overflowY: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead><tr>
+                      <th style={thS}>Constraint</th><th style={thS}>Category</th><th style={thS}>Value</th><th style={thS}>Zone</th><th style={thS}>Source</th>
+                    </tr></thead>
+                    <tbody>
+                      {constraints.map((c: any, i: number) => (
+                        <tr key={i}>
+                          <td style={{ ...tdS, color: 'var(--text-primary)', fontWeight: 500 }}>{c.name}</td>
+                          <td style={tdS}><span style={{ color: catColors[c.category] || '#999' }}>{c.category}</span></td>
+                          <td style={{ ...tdS, fontWeight: 700, color: catColors[c.category] || '#999' }}>{c.value} {c.unit}</td>
+                          <td style={{ ...tdS, color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{c.zone_id || 'site-wide'}</td>
+                          <td style={tdS}>{badge(c.source)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -342,117 +376,84 @@ export default function App() {
           </div>
         )}
 
-        {/* Node 7: Extract Constraints */}
+        {/* Node 7: Generate Volumes */}
         {selectedNode === 7 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
-              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>CONSTRAINTS</span>
-              Regulatory Constraints
+              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>VOLUMES</span>
+              3D Volume Generation
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+              <div>
+                <div className="data-card-value" style={{ fontSize: '2rem', color: '#22c55e' }}>{data.volume_summary?.total || 0}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Total Volumes</div>
+              </div>
+              <div>
+                <div className="data-card-value" style={{ fontSize: '2rem', color: '#8b5cf6' }}>{data.volume_summary?.building_floors || 0}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Building Floors</div>
+              </div>
+              <div>
+                <div className="data-card-value" style={{ fontSize: '2rem', color: '#f97316' }}>{data.volume_summary?.plinths || 0}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Plinths</div>
+              </div>
+              <div>
+                <div className="data-card-value" style={{ fontSize: '2rem', color: '#3b82f6' }}>{data.volume_summary?.parking_levels || 0}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Parking Levels</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Node 8: Validation Report — Per-zone risk table */}
+        {selectedNode === 8 && (
+          <div className="data-card" style={{ gridColumn: '1 / -1' }}>
+            <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
+              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>VALIDATION</span>
+              Per-Zone Risk Assessment
             </div>
             {(() => {
-              const constraints = data.constraints || [];
-              const summary = data.constraint_summary || {};
-              if (constraints.length === 0) {
-                return (
-                  <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                    No constraints extracted. Upload regulatory documents with constraint data.
-                  </div>
-                );
-              }
-              const catColors: Record<string, string> = {
-                height: '#3b82f6', setback: '#22c55e', density: '#f59e0b',
-                parking: '#f97316', programme: '#8b5cf6', environmental: '#06b6d4',
-                facade: '#ec4899', access: '#64748b', other: '#94a3b8',
-              };
+              const zp = data.zone_programmes || [];
+              if (zp.length === 0) return <div style={{ marginTop: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Validation data will appear after processing.</div>;
+              const thS: React.CSSProperties = { padding: '0.5rem 0.6rem', textAlign: 'left', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)', borderBottom: '1px solid rgba(255,255,255,0.1)' };
+              const tdS: React.CSSProperties = { padding: '0.45rem 0.6rem', fontSize: '0.8rem', borderBottom: '1px solid rgba(255,255,255,0.05)' };
               return (
-                <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
-                    <div>
-                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#22c55e' }}>{summary.total || constraints.length}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Total Constraints</div>
-                    </div>
-                    <div>
-                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#3b82f6' }}>{summary.regex_extracted || 0}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Pattern Extracted</div>
-                    </div>
-                    <div>
-                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#8b5cf6' }}>{summary.ai_extracted || 0}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>AI Extracted</div>
-                    </div>
-                    <div>
-                      <div className="data-card-value" style={{ fontSize: '2rem', color: '#f59e0b' }}>{summary.ai_suggested || 0}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>AI Suggested</div>
-                    </div>
-                  </div>
-                  <div style={{ marginTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '1rem', maxHeight: '280px', overflowY: 'auto' }}>
-                    <h4 style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>Constraint Details</h4>
-                    <div style={{ display: 'grid', gap: '0.5rem' }}>
-                      {constraints.map((c: any, i: number) => (
-                        <div key={i} style={{
-                          display: 'flex', alignItems: 'center', gap: '0.75rem',
-                          background: 'rgba(0,0,0,0.2)', padding: '0.7rem 1rem',
-                          borderRadius: '8px', borderLeft: `3px solid ${catColors[c.category] || '#666'}`,
-                        }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              {c.name}
-                              {c.source === 'ai_suggested' && (
-                                <span style={{ fontSize: '0.6rem', background: 'rgba(245,158,11,0.2)', color: '#fbbf24', padding: '0.1rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(245,158,11,0.3)' }}>AI Suggested</span>
-                              )}
-                              {c.source === 'ai_extracted' && (
-                                <span style={{ fontSize: '0.6rem', background: 'rgba(139,92,246,0.2)', color: '#a78bfa', padding: '0.1rem 0.4rem', borderRadius: '4px', border: '1px solid rgba(139,92,246,0.3)' }}>AI Extracted</span>
-                              )}
-                            </div>
-                            {c.raw_quote && (
-                              <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.25rem', fontStyle: 'italic' }}>"{c.raw_quote}"</div>
-                            )}
-                          </div>
-                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: catColors[c.category] || '#999' }}>{c.value} <span style={{ fontSize: '0.75rem', fontWeight: 400 }}>{c.unit}</span></div>
-                            <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                              <span style={{ color: (c.confidence || 0) >= 0.7 ? '#22c55e' : '#f59e0b' }}>{Math.round((c.confidence || 0) * 100)}%</span> · {c.category}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
+                <div style={{ marginTop: '1rem', overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead><tr>
+                      <th style={thS}>#</th><th style={thS}>Zone</th><th style={thS}>Height</th><th style={thS}>GFA</th><th style={thS}>Parking</th><th style={thS}>Risk</th>
+                    </tr></thead>
+                    <tbody>
+                      {zp.map((z: any, i: number) => {
+                        const risks: string[] = [];
+                        if (!z.target_gfa_m2) risks.push('No GFA target');
+                        if (!z.max_height_m) risks.push('No height limit');
+                        if (z.source === 'inferred') risks.push('All inferred');
+                        const riskColor = risks.length === 0 ? '#22c55e' : risks.length === 1 ? '#f59e0b' : '#ef4444';
+                        const riskLabel = risks.length === 0 ? 'LOW' : risks.length === 1 ? 'MEDIUM' : 'HIGH';
+                        return (
+                          <tr key={i}>
+                            <td style={{ ...tdS, fontWeight: 700, color: '#22c55e' }}>{z.zone_index + 1}</td>
+                            <td style={{ ...tdS, color: 'var(--text-primary)' }}>{z.zone_label || `Zone ${z.zone_index + 1}`}</td>
+                            <td style={tdS}>{z.max_height_m ? <span style={{ color: '#22c55e' }}>✓ ≤{z.max_height_m}m</span> : <span style={{ color: '#f59e0b' }}>⚠ undefined</span>}</td>
+                            <td style={tdS}>{z.target_gfa_m2 ? <span style={{ color: '#22c55e' }}>✓ {z.target_gfa_m2.toLocaleString()}m²</span> : <span style={{ color: '#f59e0b' }}>⚠ not set</span>}</td>
+                            <td style={tdS}>{z.parking_levels > 0 ? <span style={{ color: '#22c55e' }}>{z.parking_levels}L</span> : '—'}</td>
+                            <td style={tdS}><span style={{ color: riskColor, fontWeight: 600 }}>{riskLabel}</span>{risks.length > 0 && <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: 2 }}>{risks.join(', ')}</div>}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               );
             })()}
           </div>
         )}
 
-        {/* Node 8: Extract Programme (Using Extracted Text) */}
-        {selectedNode === 8 && (
+        {/* Node 9: Export */}
+        {selectedNode === 9 && (
           <div className="data-card" style={{ gridColumn: '1 / -1' }}>
-            <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>
-              <span className="data-tag" style={{ margin: 0, marginRight: '0.5rem' }}>INPUT: Document Text</span> 
-              Extracted Rules & Metadata
-            </div>
-            <div style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
-              <span style={{ color: 'var(--text-primary)' }}>Raw Text Extracted from Files</span>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '1rem', marginTop: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
-              {data.extracted_text && data.extracted_text.length > 0 ? (
-                data.extracted_text.map((item: any, i: number) => (
-                  <div key={i} style={{ background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '8px' }}>
-                    <div className="data-card-value" style={{ fontSize: '1rem', whiteSpace: 'pre-wrap' }}>{item.text}</div>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>Source: {item.source} {item.layer ? `(Layer: ${item.layer})` : ''}</div>
-                  </div>
-                ))
-              ) : (
-                <div style={{ color: 'var(--text-secondary)' }}>No text extracted from the documents.</div>
-              )}
-            </div>
-          </div>
-        )}
-        
-        {/* Node 9+: Volumes, Validation & Export */}
-        {selectedNode >= 9 && (
-          <div className="data-card" style={{ gridColumn: '1 / -1' }}>
-             <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>Spatial Generation & Validation</div>
-             <div style={{ marginTop: '1rem', color: 'var(--text-secondary)' }}>Waiting for full 3D generation algorithms based on extracted vectors...</div>
+            <div className="data-card-header" style={{ color: 'var(--accent-color)' }}>Export Package</div>
+            <div style={{ marginTop: '1rem', color: 'var(--text-secondary)' }}>Export ready. Download .3dm or .dxf via the export button.</div>
           </div>
         )}
       </div>

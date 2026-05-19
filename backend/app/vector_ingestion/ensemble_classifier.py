@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 VALID_ZONE_TYPES = {
     "plot_boundary", "buildable_envelope", "landscape_zone",
     "infrastructure_zone", "traffic_zone", "sub_zone",
-    "no_build_zone", "restriction_line", "artifact", "plinth",
+    "no_build_zone", "restriction_line", "artifact",
 }
 
 # ── Shared helpers ──────────────────────────────────────────────
@@ -68,18 +68,33 @@ def _format_site_brief_for_prompt(site_brief: Optional[Dict]) -> str:
     if site_brief.get("has_underground_parking"):
         lines.append("• Underground parking is expected")
 
-    bpz = site_brief.get("buildings_per_zone", [])
-    if bpz:
-        lines.append("• Per-zone building expectations:")
-        for z in bpz:
-            parts = [f"  Zone {z.get('zone_index', '?')}: {z.get('building_count', '?')} buildings"]
+    # ── Per-zone rules with typology guidance ──
+    zr = site_brief.get("zone_rules", [])
+    if zr:
+        lines.append("• Per-zone rules (BINDING — use these to guide classification):")
+        lines.append("  Typology catalog: single_tower | plinth_tower | perimeter_block | "
+                     "row_houses | courtyard | campus | infill")
+        for z in zr:
+            parts = [f"  Zone {z.get('zone_index', '?')} \"{z.get('zone_label', '?')}\""]
             if z.get("typology"):
                 parts.append(f"typology={z['typology']}")
-            if z.get("floors"):
-                parts.append(f"floors={z['floors']}")
-            if z.get("gfa"):
-                parts.append(f"GFA={z['gfa']}m²")
+            if z.get("expected_buildings"):
+                parts.append(f"buildings={z['expected_buildings']}")
+            if z.get("target_gfa_m2"):
+                parts.append(f"GFA={z['target_gfa_m2']}m²")
+            if z.get("max_height_m"):
+                parts.append(f"height≤{z['max_height_m']}m")
+            if z.get("use"):
+                parts.append(f"use={z['use']}")
+            src = z.get("source", "document")
+            parts.append(f"[{src}]")
             lines.append(", ".join(parts))
+        lines.append("")
+        lines.append("  If a zone has no typology defined, YOU MUST infer it from geometry:")
+        lines.append("  - Large zone (>5000m²) with multiple buildings → campus or perimeter_block")
+        lines.append("  - Medium zone with tall height limit → single_tower or plinth_tower")
+        lines.append("  - Small zone / narrow shape → row_houses or infill")
+        lines.append("  - Zone with mixed-use label → plinth_tower")
 
     rules = site_brief.get("special_rules", [])
     if rules:

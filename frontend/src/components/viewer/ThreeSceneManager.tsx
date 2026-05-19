@@ -32,6 +32,8 @@ const ZONE_COLORS: Record<string, string> = {
   setback_line: '#ef4444',
   height_limit: '#f59e0b',
   constraint_zone: '#f97316',
+  // Annotations
+  zone_annotation: '#22c55e',
   // Volumes
   building_floor: '#8b5cf6',
   plinth: '#f97316',
@@ -59,6 +61,8 @@ const ZONE_LABELS: Record<string, string> = {
   setback_line: 'Setback Line',
   height_limit: 'Height Limit',
   constraint_zone: 'Constraint',
+  // Annotations
+  zone_annotation: 'Zone Label',
   // Volumes
   building_floor: 'Floor',
   plinth: 'Plinth',
@@ -85,7 +89,7 @@ const LINE_STYLES: Record<string, { width: number; dashed?: boolean; dashScale?:
 
 /* Category buckets — matches extraction hierarchy */
 const BOUNDARY_TYPES = ['plot_boundary', 'zone_boundary', 'parcel_line', 'major_boundary', 'restriction_line'];
-const ZONE_TYPES = ['buildable_envelope', 'landscape_zone', 'infrastructure_zone', 'filled_zone', 'no_build_zone', 'uncategorized_zone', 'traffic_zone'];
+const ZONE_TYPES = ['buildable_envelope', 'landscape_zone', 'infrastructure_zone', 'filled_zone', 'no_build_zone', 'uncategorized_zone', 'traffic_zone', 'zone_annotation'];
 const BUILDING_TYPES = ['sub_zone'];
 const CONSTRAINT_TYPES = ['setback_line', 'height_limit', 'constraint_zone'];
 const VOLUME_TYPES = ['building_floor', 'plinth', 'underground_parking'];
@@ -690,8 +694,9 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
 
   const [visibleLayers, setVisibleLayers] = useState(() => {
     const saved = localStorage.getItem('omrt_visibleLayers');
-    if (saved) { try { const p = JSON.parse(saved); return { BOUNDARIES: true, ZONES: true, BUILDINGS: true, CONSTRAINTS: true, VOLUMES: true, INFRASTRUCTURE: true, ...p }; } catch {} }
-    return { BOUNDARIES: true, ZONES: true, BUILDINGS: true, CONSTRAINTS: true, VOLUMES: true, INFRASTRUCTURE: true };
+    const defaults: Record<string, boolean> = { BOUNDARIES: true, ZONES: true, BUILDINGS: true, CONSTRAINTS: true, VOLUMES: true, INFRASTRUCTURE: true, sub_zone_annotation: false };
+    if (saved) { try { return { ...defaults, ...JSON.parse(saved) }; } catch {} }
+    return defaults;
   });
 
   useEffect(() => { localStorage.setItem('omrt_visibleLayers', JSON.stringify(visibleLayers)); }, [visibleLayers]);
@@ -745,10 +750,20 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
     return defaultOpacity * 0.05;
   };
 
+  const isSublayerVisible = useCallback((zt: string) => {
+    return visibleLayers[`sub_${zt}`] !== false;
+  }, [visibleLayers]);
+
+  const toggleSublayer = useCallback((zt: string) => {
+    setVisibleLayers((prev: any) => ({ ...prev, [`sub_${zt}`]: prev[`sub_${zt}`] === false ? true : false }));
+  }, []);
+
   const renderSublayer = (cat: string, zt: string, items: any[]) => {
     const color = ZONE_COLORS[zt] || '#94a3b8';
+    const visible = isSublayerVisible(zt);
     return (
-      <div key={zt} className="legend-item compact">
+      <div key={zt} className="legend-item compact clickable" onClick={() => toggleSublayer(zt)}
+        style={{ opacity: visible ? 1 : 0.35, cursor: 'pointer' }}>
         <div className="legend-dot small" style={{ background: color }} />
         <span>{ZONE_LABELS[zt] || zt}</span>
         <span className="legend-count">{items.length}</span>
@@ -855,7 +870,7 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
           {activeNode >= 5 && (
             <group>
               {/* Boundaries — outline only */}
-              {visibleLayers.BOUNDARIES && categorized.boundaries.map((vec: any, idx: number) => {
+              {visibleLayers.BOUNDARIES && categorized.boundaries.filter((v: any) => isSublayerVisible(v.zone_type)).map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#3b82f6';
                 return (
                   <BoundaryOutline key={`b-${idx}`} vec={vec} color={color} opacity={getOpacity(0.9)}
@@ -863,8 +878,8 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
                 );
               })}
 
-              {/* Zones — filled */}
-              {visibleLayers.ZONES && categorized.zones.map((vec: any, idx: number) => {
+              {/* Zones — filled (skip annotations, rendered separately) */}
+              {visibleLayers.ZONES && categorized.zones.filter((v: any) => v.zone_type !== 'zone_annotation' && isSublayerVisible(v.zone_type)).map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#f97316';
                 if (!vec.closed && vec.filled && vec.area_pdf_units === 0) return null;
                 return vec.closed ? (
@@ -876,8 +891,8 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
                 );
               })}
 
-              {/* Buildings — outline only (no fill, no hatching) */}
-              {visibleLayers.BUILDINGS && categorized.buildings.map((vec: any, idx: number) => {
+              {/* Buildings — outline only */}
+              {visibleLayers.BUILDINGS && categorized.buildings.filter((v: any) => isSublayerVisible(v.zone_type)).map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#8b5cf6';
                 return (
                   <BoundaryOutline key={`bld-${idx}`} vec={vec} color={color} opacity={getOpacity(0.85)}
@@ -885,8 +900,8 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
                 );
               })}
 
-              {/* Constraints — height limits get the premium 3D treatment */}
-              {visibleLayers.CONSTRAINTS && categorized.constraints.map((vec: any, idx: number) => {
+              {/* Constraints */}
+              {visibleLayers.CONSTRAINTS && categorized.constraints.filter((v: any) => isSublayerVisible(v.zone_type)).map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#ef4444';
                 if (vec.zone_type === 'height_limit') {
                   return (
@@ -901,13 +916,30 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
               })}
 
               {/* Volumes — extruded floor boxes */}
-              {visibleLayers.VOLUMES && categorized.volumes.map((vec: any, idx: number) => {
+              {visibleLayers.VOLUMES && categorized.volumes.filter((v: any) => isSublayerVisible(v.zone_type)).map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#8b5cf6';
                 return (
                   <VolumeBox key={`vol-${idx}`} vec={vec} color={color} opacity={getOpacity(0.7)}
                     selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
                 );
               })}
+
+              {/* Zone annotations — labeled badges */}
+              {visibleLayers.ZONES && isSublayerVisible('zone_annotation') && categorized.zones.filter((v: any) => v.zone_type === 'zone_annotation').map((vec: any, idx: number) => (
+                vec.centroid && (
+                  <Html key={`annot-${idx}`} position={[vec.centroid[0], 1.5, vec.centroid[1] ?? vec.centroid[2] ?? 0]} center style={{ pointerEvents: 'none' }}>
+                    <div style={{
+                      background: 'rgba(34,197,94,0.92)', color: '#fff', fontWeight: 700,
+                      fontSize: '11px', fontFamily: 'Inter, system-ui, sans-serif',
+                      padding: '3px 10px', borderRadius: '5px', whiteSpace: 'nowrap',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.2)', letterSpacing: '0.3px',
+                      border: '1px solid rgba(255,255,255,0.25)',
+                    }}>
+                      {vec.annotation_text || vec.zone_label}
+                    </div>
+                  </Html>
+                )
+              ))}
 
               {/* Infrastructure — dashed, muted */}
               {visibleLayers.INFRASTRUCTURE && categorized.infra.map((vec: any, idx: number) => {

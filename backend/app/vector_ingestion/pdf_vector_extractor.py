@@ -1565,9 +1565,9 @@ def extract_vectors_from_pdf(
         # Promote nested subzones (inner same-type → sub_zone)
         deduped = _promote_nested_subzones(deduped)
 
-        # ── Plinth detection ──
-        # A sub_zone that geometrically contains other sub_zones is a plinth
-        # (a large podium with smaller buildings on top)
+        # ── Containment analysis ──
+        # Sub_zones that contain other sub_zones are buildable envelopes, not buildings.
+        # Reclassify them so the volume generator treats them correctly.
         sub_zones = [z for z in deduped if z.get("zone_type") == "sub_zone" and z.get("closed")]
         if len(sub_zones) > 1:
             for outer in sub_zones:
@@ -1589,13 +1589,13 @@ def extract_vectors_from_pdf(
                     except Exception:
                         continue
                 if inner_count >= 1:
-                    log.info("[Plinth] Detected: polygon %s contains %d sub_zones → reclassifying as plinth",
+                    log.info("[Containment] polygon %s contains %d sub_zones → reclassifying as buildable_envelope",
                              outer.get("id", "?"), inner_count)
-                    outer["zone_type"] = "plinth"
+                    outer["zone_type"] = "buildable_envelope"
                     outer["confidence"] = max(outer.get("confidence", 0), 0.80)
                     outer["classification_method"] = (
                         outer.get("classification_method", "") +
-                        f"+plinth({inner_count}_buildings)"
+                        f"+envelope({inner_count}_inner)"
                     )
 
         # Stage 6: text-based enrichment before filtering

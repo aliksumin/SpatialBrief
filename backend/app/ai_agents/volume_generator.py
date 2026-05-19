@@ -331,369 +331,371 @@ def _derive_footprints_from_envelope(
     return derived
 
 
+def _polygon_area_2d(pts: List[List[float]]) -> float:
+    """Compute area of a 2D polygon via shoelace formula (works for 3D pts too, uses x,z)."""
+    n = len(pts)
+    if n < 3:
+        return 0
+    is_3d = len(pts[0]) >= 3
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        x_i = pts[i][0]
+        y_i = pts[i][2] if is_3d else pts[i][1]
+        x_j = pts[j][0]
+        y_j = pts[j][2] if is_3d else pts[j][1]
+        area += x_i * y_j - x_j * y_i
+    return abs(area) / 2.0
+
+
 def generate_volumes(
     zones: List[Dict[str, Any]],
     programmes: List[Dict[str, Any]],
     constraints: List[Dict[str, Any]],
     site_brief: Optional[Dict[str, Any]] = None,
     zone_rules: Optional[List[Dict[str, Any]]] = None,
+    zone_programmes: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Generate 3D floor-by-floor volumes from building footprints + programme.
 
-    When no building footprints exist, derives them from the buildable
-    envelope using per-zone constraints (target GFA, density, height).
-
-    Args:
-        site_brief: Site brief with per-zone expectations
-        zone_rules: Per-zone constraint rules (height, GFA, setback per zone)
-
-    Returns:
-        {
-            "volumes": [...],           # List of volume geometry objects
-            "volume_summary": {...},    # Stats about generation
-            "derived_footprints": [...],# Footprints generated from envelope (if any)
-        }
+    Key principles:
+      - GFA-driven: floor count = target_gfa / footprint_area, capped by height
+      - Overlap prevention: skip buildings whose footprint overlaps existing ones
+      - Plinth relationship: towers sit ON the plinth (base_y = plinth_height)
+      - Zone-level parking: full zone outline, not per-building
     """
     log.info("[Volumes] Starting volume generation: %d zones, %d programmes, %d constraints",
              len(zones), len(programmes), len(constraints))
 
-    # ── Build per-zone rules lookup ──
-    # zone_rules come from Extract Constraints (which merged site_brief + extracted data)
-    zr_list = zone_rules or (site_brief.get("zone_rules", []) if site_brief else [])
-    # We'll match zone_rules to actual geometry zones later by label similarity
-    log.info("[Volumes] %d zone_rules available for per-zone constraints", len(zr_list))
+    from shapely.geometry import Polygon as ShapelyPoly
+    from shapely.validation import make_valid
 
-    # Collect building footprints (sub_zone + plinth)
-    # Filter out oversized sub_zones — they're likely misclassified envelopes
+    # ── Build per-zone rules & programme lookups ──
+    zr_list = zone_rules or (site_brief.get("zone_rules", []) if site_brief else [])
+    zp_list = zone_programmes or []
+    zp_by_zone_id: Dict[str, Dict] = {zp["zone_id"]: zp for zp in zp_list if "zone_id" in zp}
+    log.info("[Volumes] %d zone_rules, %d zone_programmes available", len(zr_list), len(zp_list))
+
+    # ── Helper: make shapely poly from points ──
+    def make_poly(pts: List[List[float]]) -> Optional[Any]:
+        if len(pts) < 3:
+            return None
+        is_3d = len(pts[0]) >= 3
+        pts_2d = [(p[0], p[2]) if is_3d else (p[0], p[1]) for p in pts]
+        try:
+            poly = ShapelyPoly(pts_2d)
+            if not poly.is_valid:
+                poly = make_valid(poly)
+            if poly.is_empty or poly.area < 0.01:
+                return None
+            return poly
+        except Exception:
+            return None
+
+    # ── Non-buildable zone types — never extruded ──
+    NON_BUILDABLE_LABELS = ("verkeer", "traffic", "road", "street", "weg",
+                            "straat", "fiets", "bicycle", "voetpad", "parking lot")
+
+    # ── Collect buildable envelopes ──
+    buildable_envelopes = []
+    for z in zones:
+        zt = z.get("zone_type", "")
+        if zt not in ("buildable_envelope", "filled_zone"):
+            continue
+        if not z.get("closed"):
+            continue
+        # Exclude traffic/road zones
+        if zt in ("traffic_zone", "infrastructure_zone", "landscape_zone"):
+            continue
+        label = (z.get("zone_label") or "").lower()
+        if any(kw in label for kw in NON_BUILDABLE_LABELS):
+            log.info("[Volumes] Skipping non-buildable zone: '%s' (label contains road/traffic keyword)", label)
+            continue
+        sp = make_poly(z.get("points", []))
+        if sp:
+            z["_shapely"] = sp
+            buildable_envelopes.append(z)
+
+    # ── Plot area for sizing reference ──
     plot_area = 0
     for z in zones:
         if z.get("zone_type") == "plot_boundary" and z.get("area_pdf_units", 0) > 0:
             plot_area = max(plot_area, z["area_pdf_units"])
-    # If no plot found, estimate from max zone area
     if not plot_area:
         plot_area = max((z.get("area_pdf_units", 0) for z in zones), default=1)
 
-    buildings = {}
+    # ── Collect building footprints (sub_zone only) ──
+    buildings: Dict[str, Dict] = {}
     for z in zones:
         zt = z.get("zone_type", "")
-        if zt not in ("sub_zone", "plinth"):
+        if zt != "sub_zone":
             continue
         z_area = z.get("area_pdf_units", 0)
-        # Skip sub_zones larger than 40% of plot — they're zone boundaries, not buildings
-        if zt == "sub_zone" and plot_area > 0 and z_area > plot_area * 0.4:
-            log.info("[Volumes] Skipping oversized sub_zone '%s' (%.0f units² = %.0f%% of plot)",
-                     z.get("zone_label", z["id"]), z_area, z_area / plot_area * 100)
+        # Skip sub_zones larger than 40% of plot — zone boundaries, not buildings
+        if plot_area > 0 and z_area > plot_area * 0.4:
+            log.info("[Volumes] Skipping oversized sub_zone '%s' (%.0f%%)",
+                     z.get("zone_label", z["id"]), z_area / plot_area * 100)
             continue
-        buildings[z["id"]] = z
+        sp = make_poly(z.get("points", []))
+        if sp:
+            z["_shapely"] = sp
+            buildings[z["id"]] = z
 
-    log.info("[Volumes] %d building footprints collected (filtered from %d sub_zone/plinth)",
-             len(buildings), sum(1 for z in zones if z.get('zone_type') in ('sub_zone', 'plinth')))
+    log.info("[Volumes] %d building footprints collected", len(buildings))
 
-    # ── If no buildings found, derive from envelope + constraints ──
-    derived_footprints: List[Dict[str, Any]] = []
-    if not buildings:
-        log.info("[Volumes] No building footprints found — deriving from envelope + constraints")
-        derived_footprints = _derive_footprints_from_envelope(zones, constraints)
-        if derived_footprints:
-            for df in derived_footprints:
-                buildings[df["id"]] = df
-                zones.append(df)  # Add to zones so downstream sees them
-            log.info("[Volumes] Derived %d building footprint(s) from envelope", len(derived_footprints))
-        else:
-            log.info("[Volumes] Could not derive footprints — no volumes to generate")
-            return {"volumes": [], "volume_summary": {"total": 0}, "derived_footprints": []}
-    else:
-        # ── Check for empty buildable zones (zones with no buildings inside) ──
-        from shapely.geometry import Polygon as ShapelyPoly
-        from shapely import affinity
-
-        # Include: explicit buildable types + oversized sub_zones we filtered out
-        buildable_zones = []
-        for z in zones:
-            if not z.get("closed"):
-                continue
-            zt = z.get("zone_type", "")
-            zid = z.get("id", "")
-            if zt in ("buildable_envelope", "filled_zone", "uncategorized_zone"):
-                buildable_zones.append(z)
-            elif zt == "sub_zone" and zid not in buildings:
-                # Oversized sub_zone that was filtered from buildings — treat as zone
-                buildable_zones.append(z)
-        building_list = list(buildings.values())
-        log.info("[Volumes] Checking %d zones for empty buildable areas", len(buildable_zones))
-
-        for bz in buildable_zones:
-            bz_sp = bz.get("shapely_poly")
-            if not bz_sp:
-                pts = bz.get("points", [])
-                if len(pts) < 3:
-                    continue
-                is_3d = len(pts[0]) == 3
-                pts_2d = [(p[0], p[2]) if is_3d else (p[0], p[1]) for p in pts]
-                try:
-                    bz_sp = ShapelyPoly(pts_2d)
-                    if not bz_sp.is_valid:
-                        from shapely.validation import make_valid
-                        bz_sp = make_valid(bz_sp)
-                except Exception:
-                    continue
-
-            # Check if ANY building is inside this zone
-            has_building_inside = False
-            for b in building_list:
-                b_sp = b.get("shapely_poly")
-                if not b_sp:
-                    b_pts = b.get("points", [])
-                    if len(b_pts) < 3:
-                        continue
-                    b_is_3d = len(b_pts[0]) == 3
-                    b_pts_2d = [(p[0], p[2]) if b_is_3d else (p[0], p[1]) for p in b_pts]
-                    try:
-                        b_sp = ShapelyPoly(b_pts_2d)
-                    except Exception:
-                        continue
-                try:
-                    if bz_sp.contains(b_sp.centroid) or (
-                        bz_sp.intersection(b_sp).area > b_sp.area * 0.5
-                    ):
-                        has_building_inside = True
-                        break
-                except Exception:
-                    continue
-
-            if not has_building_inside:
-                # Find matching zone_rule for this zone
-                bz_label = (bz.get("zone_label") or "").lower()
-                matched_rule = None
-                for zr in zr_list:
-                    zr_label = (zr.get("zone_label") or "").lower()
-                    if zr_label and bz_label and (
-                        zr_label in bz_label or bz_label in zr_label
-                    ):
-                        matched_rule = zr
-                        break
-                # If no match by label, use the next unmatched rule
-                if not matched_rule and zr_list:
-                    matched_rule = zr_list[0]
-
-                # Build per-zone constraints for derivation
-                zone_constraints = list(constraints)  # start with site-wide
-                if matched_rule:
-                    # Add zone-specific overrides as constraints
-                    if matched_rule.get("max_height_m"):
-                        zone_constraints.append({
-                            "category": "height", "value": matched_rule["max_height_m"],
-                            "unit": "m", "name": f"Height ({matched_rule.get('zone_label', '')})",
-                        })
-                    if matched_rule.get("target_gfa_m2"):
-                        zone_constraints.append({
-                            "category": "gfa", "value": matched_rule["target_gfa_m2"],
-                            "unit": "m²", "name": f"GFA ({matched_rule.get('zone_label', '')})",
-                        })
-
-                log.info("[Volumes] Empty zone: %s (%s) — deriving footprint (rule: %s)",
-                         bz.get("id", "?"), bz_label or bz.get("zone_type"),
-                         matched_rule.get("zone_label") if matched_rule else "none")
-
-                single_zone_derived = _derive_footprints_from_envelope(
-                    [bz] + [z for z in zones if z.get("zone_type") == "plot_boundary"],
-                    zone_constraints,
-                )
-                for df in single_zone_derived:
-                    df["id"] = f"derived_{bz['id']}"
-                    df["zone_label"] = f"Derived ({bz.get('zone_label', 'Mixed-Use')})"
-                    if matched_rule:
-                        df["_zone_rule"] = matched_rule
-                    buildings[df["id"]] = df
-                    zones.append(df)
-                    derived_footprints.append(df)
-                    log.info("[Volumes] Derived building for empty zone: %s", df["id"])
-
-    # Map programme by building_id
-    prog_by_building = {p["building_id"]: p for p in programmes if "building_id" in p}
-
-    # Get most restrictive height constraint (minimum value = strictest limit)
-    max_height = None
-    target_gfa = None
-    for c in constraints:
-        if c.get("category") == "height":
-            if max_height is None or c["value"] < max_height:
-                max_height = c["value"]
-        elif c.get("category") == "gfa":
-            if target_gfa is None or c["value"] > target_gfa:
-                target_gfa = c["value"]
-
-    # ── Detect plinth-building relationships ──
-    # A plinth is a large footprint containing smaller building footprints.
-    # Buildings on a plinth should start from the plinth top, not ground.
-    plinths = {bid: b for bid, b in buildings.items()
-               if b.get("zone_type") == "plinth"}
-    towers = {bid: b for bid, b in buildings.items()
-              if b.get("zone_type") == "sub_zone"}
-
-    # Map each tower to the plinth it sits on (if any)
-    tower_plinth_map: Dict[str, str] = {}
-    for tid, tower in towers.items():
-        t_sp = tower.get("shapely_poly")
-        if not t_sp:
+    # ── Map each building to its parent buildable zone ──
+    bldg_parent_zone: Dict[str, Dict] = {}
+    for bid, bldg in buildings.items():
+        b_sp = bldg.get("_shapely")
+        if not b_sp:
             continue
-        for pid, plinth in plinths.items():
-            p_sp = plinth.get("shapely_poly")
-            if not p_sp:
+        for env in buildable_envelopes:
+            e_sp = env.get("_shapely")
+            if not e_sp:
                 continue
             try:
-                if p_sp.contains(t_sp) or (
-                    p_sp.intersection(t_sp).area > t_sp.area * 0.7
-                ):
-                    tower_plinth_map[tid] = pid
+                if e_sp.contains(b_sp.centroid) or e_sp.intersection(b_sp).area > b_sp.area * 0.3:
+                    bldg_parent_zone[bid] = env
                     break
             except Exception:
                 continue
 
-    if tower_plinth_map:
-        log.info("[Volumes] Plinth-tower relationships: %s",
-                 {tid: pid for tid, pid in tower_plinth_map.items()})
+    # ── Derive footprints for empty buildable zones ──
+    derived_footprints: List[Dict[str, Any]] = []
+    if not buildings:
+        log.info("[Volumes] No buildings — deriving from all buildable envelopes")
+        for env in buildable_envelopes:
+            zp = zp_by_zone_id.get(env.get("id", ""))
+            zone_gfa = zp.get("target_gfa_m2") if zp else None
+            zone_height = zp.get("max_height_m") if zp else None
+            zone_constraints = list(constraints)
+            if zone_gfa:
+                zone_constraints.append({"category": "gfa", "value": zone_gfa, "unit": "m²", "name": "Zone GFA"})
+            if zone_height:
+                zone_constraints.append({"category": "height", "value": zone_height, "unit": "m", "name": "Zone Height"})
+            dfs = _derive_footprints_from_envelope([env], zone_constraints)
+            for df in dfs:
+                sp = make_poly(df.get("points", []))
+                if sp:
+                    df["_shapely"] = sp
+                buildings[df["id"]] = df
+                bldg_parent_zone[df["id"]] = env
+                zones.append(df)
+                derived_footprints.append(df)
+    else:
+        # Check for empty zones that have no buildings inside
+        for env in buildable_envelopes:
+            e_sp = env.get("_shapely")
+            if not e_sp:
+                continue
+            has_bldg = any(
+                bldg_parent_zone.get(bid) and bldg_parent_zone[bid].get("id") == env.get("id")
+                for bid in buildings
+            )
+            if has_bldg:
+                continue
+            # Empty zone — derive a building
+            zp = zp_by_zone_id.get(env.get("id", ""))
+            zone_gfa = zp.get("target_gfa_m2") if zp else None
+            zone_height = zp.get("max_height_m") if zp else None
+            zone_constraints = list(constraints)
+            if zone_gfa:
+                zone_constraints.append({"category": "gfa", "value": zone_gfa, "unit": "m²", "name": "Zone GFA"})
+            if zone_height:
+                zone_constraints.append({"category": "height", "value": zone_height, "unit": "m", "name": "Zone Height"})
+            log.info("[Volumes] Empty zone '%s' — deriving footprint", env.get("zone_label", env.get("id")))
+            dfs = _derive_footprints_from_envelope([env], zone_constraints)
+            for df in dfs:
+                df["id"] = f"derived_{env['id']}"
+                df["zone_label"] = f"Derived ({env.get('zone_label', 'Building')})"
+                sp = make_poly(df.get("points", []))
+                if sp:
+                    df["_shapely"] = sp
+                buildings[df["id"]] = df
+                bldg_parent_zone[df["id"]] = env
+                zones.append(df)
+                derived_footprints.append(df)
 
+    if not buildings:
+        log.info("[Volumes] No buildings to generate volumes for")
+        return {"volumes": [], "volume_summary": {"total": 0}, "derived_footprints": [], "annotations": []}
+
+    # ── Global constraints fallback ──
+    max_height_global = None
+    all_heights = []
+    for c in constraints:
+        if c.get("category") == "height":
+            v = c.get("value", 0)
+            if v > 0:
+                all_heights.append(v)
+                if max_height_global is None or v < max_height_global:
+                    max_height_global = v
+
+    # Safety: if NO height constraint found, use a reasonable default (45m ≈ 15 floors)
+    if max_height_global is None:
+        max_height_global = 45.0
+        log.warning("[Volumes] No height constraints found — using default cap of %.0fm", max_height_global)
+    else:
+        log.info("[Volumes] Height constraints found: %s → using most restrictive = %.1fm",
+                 [f"{h:.0f}m" for h in all_heights], max_height_global)
+
+    # ── Generate zone-level volumes: plinths + parking ──
     volumes: List[Dict[str, Any]] = []
+    plinth_heights: Dict[str, float] = {}
+
+    for env in buildable_envelopes:
+        env_id = env.get("id", "")
+        env_pts = env.get("points", [])
+        if len(env_pts) < 3:
+            continue
+
+        zp = zp_by_zone_id.get(env_id)
+        if not zp:
+            env_label = (env.get("zone_label") or "").lower()
+            for zpx in zp_list:
+                zp_label = (zpx.get("zone_label") or "").lower()
+                if zp_label and env_label and (zp_label in env_label or env_label in zp_label):
+                    zp = zpx
+                    break
+
+        typology = zp.get("typology", "infill") if zp else "infill"
+        parking_levels = zp.get("parking_levels", 0) if zp else 0
+
+        # ── Plinth (only for plinth_tower typology) ──
+        if typology == "plinth_tower":
+            plinth_height = DEFAULT_PLINTH_HEIGHT
+            volumes.append(_create_floor_volume(
+                footprint=env_pts, y_bottom=0, y_top=plinth_height,
+                building_id=f"plinth_{env_id}",
+                building_label=f"Plinth ({env.get('zone_label', 'Mixed-Use')})",
+                floor_index=0, floor_label="Commercial Plinth",
+                use_type="retail", volume_type="plinth", confidence=0.75,
+            ))
+            plinth_heights[env_id] = plinth_height
+            log.info("[Volumes] Plinth for '%s' (%.1fm)", env.get("zone_label", env_id), plinth_height)
+
+        # ── Zone-level underground parking ──
+        if parking_levels > 0:
+            for pl in range(parking_levels):
+                y_bottom = -(pl + 1) * DEFAULT_PARKING_DEPTH
+                y_top = -pl * DEFAULT_PARKING_DEPTH
+                volumes.append(_create_floor_volume(
+                    footprint=env_pts, y_bottom=y_bottom, y_top=y_top,
+                    building_id=f"parking_{env_id}",
+                    building_label=f"Parking ({env.get('zone_label', '')})",
+                    floor_index=-(pl + 1), floor_label=f"Parking B{pl + 1}",
+                    use_type="underground_parking", volume_type="underground_parking",
+                    confidence=0.70,
+                ))
+            log.info("[Volumes] %d parking levels for '%s'", parking_levels, env.get("zone_label", env_id))
+
+    # ── Overlap detection: track processed footprint polygons per zone ──
+    processed_polys: List[Any] = []  # list of shapely polys already extruded
+
     buildings_processed = 0
+    prog_by_building = {p["building_id"]: p for p in programmes if "building_id" in p}
 
     for bid, bldg in buildings.items():
         footprint = bldg.get("points", [])
         if len(footprint) < 3:
             continue
 
-        is_plinth = bldg.get("zone_type") == "plinth"
+        b_sp = bldg.get("_shapely")
+        if not b_sp:
+            b_sp = make_poly(footprint)
+        if not b_sp:
+            continue
+
+        # ── Overlap check: skip if >20% overlap with any processed building ──
+        skip = False
+        for existing_sp in processed_polys:
+            try:
+                inter = b_sp.intersection(existing_sp)
+                if inter.area > b_sp.area * 0.20:
+                    log.info("[Volumes] Skipping '%s' — overlaps existing building (%.0f%%)",
+                             bldg.get("zone_label", bid), inter.area / b_sp.area * 100)
+                    skip = True
+                    break
+            except Exception:
+                continue
+        if skip:
+            continue
+
+        processed_polys.append(b_sp)
+
+        # ── Get zone-level constraints from parent zone ──
+        parent_zone = bldg_parent_zone.get(bid)
+        parent_id = parent_zone.get("id", "") if parent_zone else ""
+        zp = zp_by_zone_id.get(parent_id) if parent_id else None
+
+        # Zone-level constraints
+        zone_max_height = None
+        zone_target_gfa = None
+        if zp:
+            zone_max_height = zp.get("max_height_m")
+            zone_target_gfa = zp.get("target_gfa_m2")
+
+        # Fall back to site-wide
+        effective_max_height = zone_max_height or max_height_global
+        log.info("[Volumes] Building '%s': zone_height=%s, global=%s → effective=%.1fm",
+                 bldg.get("zone_label", bid),
+                 f"{zone_max_height:.0f}m" if zone_max_height else "none",
+                 f"{max_height_global:.0f}m" if max_height_global else "none",
+                 effective_max_height or 0)
+
+        # ── Determine base_y (plinth_tower: tower starts on top of plinth) ──
+        base_y = 0.0
+        if parent_id in plinth_heights:
+            base_y = plinth_heights[parent_id]
+
+        # ── Compute footprint area ──
+        footprint_area = b_sp.area
+        if footprint_area < 0.1:
+            continue
+
+        # ── GFA-driven floor count ──
+        floor_height = DEFAULT_FLOOR_HEIGHT
         prog = prog_by_building.get(bid)
         is_derived = bldg.get("_derived", False)
-
-        # ── Per-zone height/GFA lookup ──
-        # Check if this building has a zone_rule (from derivation) or find one by containment
-        bldg_zone_rule = bldg.get("_zone_rule")
-        bldg_max_height = max_height  # default to site-wide
-
-        if not bldg_zone_rule and zr_list:
-            # Try to find a zone_rule matching this building's label
-            bl = (bldg.get("zone_label") or "").lower()
-            for zr in zr_list:
-                zl = (zr.get("zone_label") or "").lower()
-                if zl and bl and (zl in bl or bl in zl):
-                    bldg_zone_rule = zr
-                    break
-
-        if bldg_zone_rule:
-            zr_height = bldg_zone_rule.get("max_height_m")
-            if zr_height:
-                bldg_max_height = zr_height
-                log.debug("[Volumes] Using per-zone height %.1fm for '%s'",
-                          bldg_max_height, bldg.get("zone_label", bid))
 
         if prog:
             floors = prog.get("floors", 4)
             floor_height = prog.get("floor_height", DEFAULT_FLOOR_HEIGHT)
-            has_plinth = prog.get("has_plinth", False)
-            has_parking = prog.get("has_underground_parking", False)
-            parking_ratio = prog.get("parking_ratio", 0)
             uses = prog.get("uses", [])
             blabel = prog.get("building_label", bldg.get("zone_label", f"Building {buildings_processed + 1}"))
             confidence = prog.get("confidence", 0.7)
-        elif is_derived:
-            floor_height = DEFAULT_FLOOR_HEIGHT
-            floors = bldg.get("_target_floors", 4)
-            # Override with zone_rule if available
-            if bldg_zone_rule and bldg_zone_rule.get("max_height_m"):
-                floors = max(1, int(bldg_zone_rule["max_height_m"] / floor_height))
-            has_plinth = False
-            has_parking = False
-            parking_ratio = 0
-            uses = [{"floor": f, "use": "residential", "label": "Residential"} for f in range(floors)]
-            blabel = bldg.get("zone_label", f"Derived Building {buildings_processed + 1}")
-            confidence = 0.50
         else:
-            floor_height = DEFAULT_FLOOR_HEIGHT
-            if bldg_max_height:
-                floors = max(1, int(bldg_max_height / floor_height))
+            # GFA-driven: floors = target_gfa / footprint_area
+            if zone_target_gfa and zone_target_gfa > 0 and footprint_area > 0:
+                # Count buildings in this zone to split GFA
+                bldgs_in_zone = sum(1 for b2id in buildings
+                                    if bldg_parent_zone.get(b2id, {}).get("id") == parent_id)
+                bldgs_in_zone = max(bldgs_in_zone, 1)
+                gfa_per_building = zone_target_gfa / bldgs_in_zone
+                floors = max(1, math.ceil(gfa_per_building / footprint_area))
+                log.info("[Volumes] GFA-driven: '%s' → %.0fm² GFA / %.0fm² footprint / %d bldgs = %d floors",
+                         bldg.get("zone_label", bid), zone_target_gfa, footprint_area, bldgs_in_zone, floors)
+            elif effective_max_height:
+                available = effective_max_height - base_y
+                floors = max(1, int(available / floor_height))
             else:
                 floors = 4
-            has_plinth = False
-            has_parking = False
-            parking_ratio = 0
-            uses = [{"floor": f, "use": "residential", "label": "Residential"} for f in range(floors)]
+
+            uses = []
             blabel = bldg.get("zone_label", f"Building {buildings_processed + 1}")
-            confidence = 0.45
+            confidence = 0.55 if is_derived else 0.50
 
-        # ── If this IS a plinth, generate only 1 plinth floor ──
-        if is_plinth:
-            plinth_height = DEFAULT_PLINTH_HEIGHT
-            volumes.append(_create_floor_volume(
-                footprint=footprint,
-                y_bottom=0,
-                y_top=plinth_height,
-                building_id=bid,
-                building_label=blabel or "Plinth",
-                floor_index=0,
-                floor_label="Commercial Plinth",
-                use_type="retail",
-                volume_type="plinth",
-                confidence=confidence,
-            ))
-            # Underground parking under plinth
-            if has_parking:
-                parking_levels = 2 if parking_ratio > 2.0 else 1
-                for pl in range(parking_levels):
-                    y_bottom = -(pl + 1) * DEFAULT_PARKING_DEPTH
-                    y_top = -pl * DEFAULT_PARKING_DEPTH
-                    volumes.append(_create_floor_volume(
-                        footprint=footprint,
-                        y_bottom=y_bottom,
-                        y_top=y_top,
-                        building_id=bid,
-                        building_label=blabel or "Plinth",
-                        floor_index=-(pl + 1),
-                        floor_label=f"Parking B{pl + 1}",
-                        use_type="underground_parking",
-                        volume_type="underground_parking",
-                        confidence=confidence * 0.8,
-                    ))
-            buildings_processed += 1
-            continue
-
-        # ── Regular building (tower) — check if sits on a plinth ──
-        parent_plinth_id = tower_plinth_map.get(bid)
-        base_y = DEFAULT_PLINTH_HEIGHT if parent_plinth_id else 0
-
-        # Enforce height constraint (per-zone or site-wide)
-        effective_height = bldg_max_height or max_height
-        if effective_height:
-            available_height = effective_height - base_y
+        # ── Cap by height constraint ──
+        if effective_max_height:
+            available_height = effective_max_height - base_y
             max_floors = max(1, int(available_height / floor_height))
             if floors > max_floors:
+                log.info("[Volumes] Height cap: '%s' %d→%d floors (limit=%.1fm, base=%.1fm)",
+                         blabel, floors, max_floors, effective_max_height, base_y)
                 floors = max_floors
-            total_height = base_y + floors * floor_height
-            log.info("[Volumes] Height-capped '%s': %d floors, %.1fm (base=%.1fm, limit=%.1fm%s)",
-                     blabel, floors, total_height, base_y, effective_height,
-                     " [per-zone]" if bldg_zone_rule else "")
 
-        # Underground parking (only if building is NOT on a plinth)
-        if has_parking and not parent_plinth_id:
-            parking_levels = 2 if parking_ratio > 2.0 else 1
-            for pl in range(parking_levels):
-                y_bottom = -(pl + 1) * DEFAULT_PARKING_DEPTH
-                y_top = -pl * DEFAULT_PARKING_DEPTH
-                volumes.append(_create_floor_volume(
-                    footprint=footprint,
-                    y_bottom=y_bottom,
-                    y_top=y_top,
-                    building_id=bid,
-                    building_label=blabel,
-                    floor_index=-(pl + 1),
-                    floor_label=f"Parking B{pl + 1}",
-                    use_type="underground_parking",
-                    volume_type="underground_parking",
-                    confidence=confidence * 0.8,
-                ))
-
-        # Above-ground floors
+        # ── Generate above-ground floors ──
         for f in range(floors):
             y_bottom = base_y + f * floor_height
             y_top = base_y + (f + 1) * floor_height
@@ -710,24 +712,44 @@ def generate_volumes(
                     floor_use = uses[-1].get("use", "residential") if uses else "residential"
                     floor_label = f"Floor {f}"
 
-            # Ground floor of a building ON a plinth doesn't get a plinth label
-            # (the plinth is already a separate volume)
-            volume_type = "building_floor"
-
             volumes.append(_create_floor_volume(
-                footprint=footprint,
-                y_bottom=y_bottom,
-                y_top=y_top,
-                building_id=bid,
-                building_label=blabel,
-                floor_index=f,
-                floor_label=floor_label,
-                use_type=floor_use,
-                volume_type=volume_type,
+                footprint=footprint, y_bottom=y_bottom, y_top=y_top,
+                building_id=bid, building_label=blabel,
+                floor_index=f, floor_label=floor_label,
+                use_type=floor_use, volume_type="building_floor",
                 confidence=confidence,
             ))
 
         buildings_processed += 1
+
+    # ── Zone annotation tags (numbered labels at zone centroids) ──
+    annotations: List[Dict[str, Any]] = []
+    for idx, env in enumerate(buildable_envelopes):
+        env_pts = env.get("points", [])
+        if len(env_pts) < 3:
+            continue
+        cx = sum(p[0] for p in env_pts) / len(env_pts)
+        cy = sum(p[1] for p in env_pts) / len(env_pts)
+        zone_num = idx + 1
+        zone_label = env.get("zone_label", f"Zone {zone_num}")
+        annotations.append({
+            "id": f"annot_zone_{env.get('id', idx)}",
+            "type": "annotation",
+            "zone_type": "zone_annotation",
+            "zone_label": f"Z{zone_num}",
+            "annotation_text": f"Z{zone_num}: {zone_label}",
+            "points": [[cx, cy]],
+            "centroid": [cx, cy],
+            "closed": False,
+            "filled": False,
+            "color_hint": "#22c55e",
+            "layer": "Zones",
+            "sublayer": "Annotation",
+            "confidence": 1.0,
+            "zone_number": zone_num,
+        })
+    if annotations:
+        log.info("[Volumes] Created %d zone annotation tags", len(annotations))
 
     # Summary
     summary = {
@@ -737,6 +759,7 @@ def generate_volumes(
         "plinths": len([v for v in volumes if v["zone_type"] == "plinth"]),
         "parking_levels": len([v for v in volumes if v["zone_type"] == "underground_parking"]),
         "derived_from_envelope": len(derived_footprints),
+        "annotations": len(annotations),
     }
 
     log.info("[Volumes] Generated %d volumes (%d floors, %d plinths, %d parking) for %d buildings (%d derived)",
@@ -748,4 +771,7 @@ def generate_volumes(
         "volumes": volumes,
         "volume_summary": summary,
         "derived_footprints": derived_footprints,
+        "annotations": annotations,
     }
+
+
