@@ -435,6 +435,143 @@ def _run_judge_agent(client, model_name, n_polygons, visual, geometric, contextu
     return _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_judge")
 
 
+# ── Refinement Agent (Iterations 2–3) ──────────────────────────
+
+def _build_refinement_prompt(n_polygons, current_results, manifest, iteration, site_brief_text=""):
+    """Build a prompt for refinement iterations 2 and 3.
+
+    The refinement agent reviews the PREVIOUS iteration's classifications
+    alongside the original images and polygon metadata to catch mistakes.
+    """
+    return f"""You are a SENIOR QUALITY REVIEWER for an urban planning zone classification
+system. This is REFINEMENT ITERATION {iteration} of 3.
+
+A team of specialist agents has already classified {n_polygons} polygons from a
+zoning plan. Your job is to REVIEW their work and CORRECT any mistakes.
+{site_brief_text}
+── CURRENT CLASSIFICATIONS (from iteration {iteration - 1}) ──
+{json.dumps(current_results, indent=2)}
+
+── POLYGON METADATA (ground truth measurements) ──
+{json.dumps(manifest, indent=2)}
+
+The FIRST image is the original rendered PDF page.
+The SECOND image is the same page with numbered, colour-coded polygon overlays.
+
+── YOUR REVIEW CHECKLIST ──
+
+1. MISSED BUILDINGS: Are there polygons that should be "sub_zone" (buildings)
+   but were classified as something else? Look at the images carefully —
+   rectangular or L/T/U-shaped outlines inside buildable zones are buildings.
+
+2. WRONG CLASSIFICATIONS: Are any classifications obviously wrong?
+   - A small compact rectangle classified as "infrastructure_zone" → probably "sub_zone"
+   - A large filled area classified as "sub_zone" → probably a zone type
+   - A building classified as "artifact" → check the image, it might be real
+
+3. BUILDING SHAPE REALISM: For each polygon classified as "sub_zone", check:
+   - Is the outline realistically shaped for a building footprint?
+   - Is it too NARROW (aspect_ratio > 8)? → probably a line/boundary, not a building
+   - Is it too BIG relative to other buildings on the plan? → might be a zone, not a building
+   - Is it too SMALL to be a real building? → might be an artifact
+   - Does the shape make architectural sense? (rectangles, L-shapes, U-shapes are OK;
+     very irregular or spiky shapes are not buildings)
+
+4. ZONE COUNT CONSISTENCY: Does the total number of buildings and zones match
+   what the site brief expects? If the brief says 5 buildings but only 3 are
+   classified, look harder at the images for missed ones.
+
+5. SPATIAL CONSISTENCY: Are buildings located inside buildable zones?
+   A "sub_zone" outside all buildable envelopes is suspicious.
+
+── YOUR OUTPUT ──
+Return a COMPLETE classification for ALL {n_polygons} polygons.
+For each polygon, either:
+- CONFIRM the previous classification (keep same zone_type, raise confidence)
+- CORRECT the classification (change zone_type, explain why)
+- FLAG for attention (if unsure, add "needs_review": true)
+
+Return ONLY valid JSON array:
+[{{"id": 0, "zone_type": "...", "confidence": 0.95, "reason": "...", "changed": true/false}}]
+
+You MUST classify ALL {n_polygons} polygons. Do not skip any.
+When correcting, explain what was wrong and why your classification is better.
+"""
+
+
+def _run_refinement_iteration(
+    client, model_name, polygons, current_results, manifest,
+    clean_img, annotated_img, iteration,
+    site_brief_text="", cost_tracker=None,
+) -> List[Dict]:
+    """Run a single refinement iteration.
+
+    Sends the previous classification results + original images to the
+    refinement agent for review and correction.
+    """
+    from google.genai import types
+
+    prompt = _build_refinement_prompt(
+        len(polygons), current_results, manifest, iteration, site_brief_text,
+    )
+    parts = [
+        types.Part.from_bytes(data=clean_img, mime_type="image/jpeg"),
+        types.Part.from_bytes(data=annotated_img, mime_type="image/jpeg"),
+        prompt,
+    ]
+
+    log.info("[Ensemble/Refine-%d] Calling %s with %d images + previous results...",
+             iteration, model_name, 2)
+    return _call_gemini(
+        client, model_name, parts,
+        cost_tracker=cost_tracker,
+        stage=f"ensemble_refine_{iteration}",
+    )
+
+
+def _apply_refinement(current_results, refinement_results, iteration):
+    """Merge refinement corrections into current results.
+
+    Returns (updated_results, changes_count) where updated_results is the
+    merged list and changes_count is how many classifications changed.
+    """
+    # Index refinement results by polygon id
+    refine_map = {}
+    for r in refinement_results:
+        rid = r.get("id")
+        if rid is not None:
+            refine_map[rid] = r
+
+    # Build updated results
+    updated = []
+    changes = 0
+    for cr in current_results:
+        cid = cr.get("id")
+        ref = refine_map.get(cid)
+        if ref and ref.get("zone_type") in VALID_ZONE_TYPES:
+            old_type = cr.get("zone_type", "unknown")
+            new_type = ref["zone_type"]
+            if old_type != new_type:
+                changes += 1
+                log.info("[Ensemble/Refine-%d] Polygon %s: %s → %s (%s)",
+                         iteration, cid, old_type, new_type,
+                         ref.get("reason", "")[:80])
+            updated.append({
+                "id": cid,
+                "zone_type": new_type,
+                "confidence": ref.get("confidence", cr.get("confidence", 0.8)),
+                "reason": ref.get("reason", cr.get("reason", "")),
+                "agreement": f"refine_{iteration}",
+            })
+        else:
+            # No refinement data for this polygon — keep current
+            updated.append(cr)
+
+    log.info("[Ensemble/Refine-%d] %d/%d classifications changed",
+             iteration, changes, len(current_results))
+    return updated, changes
+
+
 # ── Ensemble Orchestrator ───────────────────────────────────────
 
 def classify_polygons_ensemble(
@@ -592,10 +729,34 @@ def classify_polygons_ensemble(
             log.warning("[Ensemble] Only %d agent(s) succeeded — using single-agent results", successful)
             judge_results = next(r for r in agent_results if len(r) > 0)
 
-        # ── Step 5: Apply results to polygons ──
-        _apply_classifications(polygons, judge_results, page_area)
+        # ── Step 5: Iterative refinement (iterations 2–3) ──
+        current_results = judge_results
+        for iteration in (2, 3):
+            log.info("[Ensemble] ── Refinement iteration %d/3 ──", iteration)
+            try:
+                refinement_results = _run_refinement_iteration(
+                    client, m_judge, polygons, current_results, manifest,
+                    clean_img, annotated_img, iteration,
+                    brief_text, cost_tracker,
+                )
+                if refinement_results and len(refinement_results) > 0:
+                    current_results, n_changes = _apply_refinement(
+                        current_results, refinement_results, iteration,
+                    )
+                    if n_changes == 0:
+                        log.info("[Ensemble/Refine-%d] No changes — classifications stable, skipping further iterations", iteration)
+                        break
+                else:
+                    log.warning("[Ensemble/Refine-%d] Empty result — keeping previous classifications", iteration)
+                    break
+            except Exception as e:
+                log.error("[Ensemble/Refine-%d] Failed: %s — keeping previous classifications", iteration, e)
+                break
 
-        # ── Step 6: Spatial conflict detection & resolution ──
+        # ── Step 6: Apply final results to polygons ──
+        _apply_classifications(polygons, current_results, page_area)
+
+        # ── Step 7: Spatial conflict detection & resolution ──
         conflicts = _detect_spatial_conflicts(polygons)
         if conflicts:
             log.info("[Ensemble] Detected %d spatial conflicts — launching resolver agent...", len(conflicts))
@@ -610,7 +771,7 @@ def classify_polygons_ensemble(
         else:
             log.info("[Ensemble] No spatial conflicts detected")
 
-        # ── Step 7: Safety nets ──
+        # ── Step 8: Safety nets ──
         _enforce_hard_rules(polygons, page_area)
 
         _cleanup_temp_keys(polygons)
