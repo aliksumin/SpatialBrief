@@ -99,6 +99,28 @@ _PARKING_PATTERNS = [
     ),
 ]
 
+_GFA_CONSTRAINT_PATTERNS = [
+    # "GFA: 13,500 m2", "gross floor area: 12000 sqm", "BVO: 8500 m²"
+    re.compile(
+        r"(?:GFA|gross\s*floor\s*area|bruto\s*vloer(?:opp(?:ervlak(?:te)?)?)?|BVO|BGF)"
+        r"\s*[:=]?\s*([\d.,]+)\s*(?:m[²2]|sqm)?",
+        re.IGNORECASE,
+    ),
+    # "total area: 5000 m2", "totale oppervlakte: 8000 m2"
+    re.compile(
+        r"(?:total|totale?)\s*(?:floor\s*)?(?:area|oppervlak(?:te)?)"
+        r"\s*[:=]?\s*([\d.,]+)\s*(?:m[²2]|sqm)?",
+        re.IGNORECASE,
+    ),
+    # "target GFA: 12000", "beoogde BVO: 10000"
+    re.compile(
+        r"(?:target|beoogd[e]?|max(?:imale?)?|minimum?)\s*"
+        r"(?:GFA|BVO|BGF|floor\s*area)"
+        r"\s*[:=]?\s*([\d.,]+)\s*(?:m[²2]|sqm)?",
+        re.IGNORECASE,
+    ),
+]
+
 
 def _parse_number(s: str) -> float:
     """Parse a number from string, handling comma decimals."""
@@ -234,6 +256,36 @@ def _extract_regex(text_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     name="Parking Norm",
                     category="parking",
                     value=val, unit="per dwelling",
+                    raw_quote=m.group(0),
+                ))
+
+        # GFA / Target Floor Area
+        for pat in _GFA_CONSTRAINT_PATTERNS:
+            for m in pat.finditer(text):
+                try:
+                    val = _parse_number(m.group(1))
+                except (ValueError, IndexError):
+                    continue
+                if val < 50 or val > 5_000_000:
+                    continue
+                key = ("gfa", val)
+                if key in seen_values:
+                    continue
+                seen_values.add(key)
+
+                ctx = m.group(0).lower()
+                if "target" in ctx or "beoogd" in ctx:
+                    name = "Target GFA"
+                elif "max" in ctx:
+                    name = "Maximum GFA"
+                elif "min" in ctx:
+                    name = "Minimum GFA"
+                else:
+                    name = "Gross Floor Area"
+
+                constraints.append(_make_constraint(
+                    name=name, category="gfa",
+                    value=val, unit="m²",
                     raw_quote=m.group(0),
                 ))
 
@@ -687,11 +739,23 @@ def _generate_constraint_geometry(
                 "confidence": max_height_cst["confidence"],
                 "classification_method": "height_limit_contour",
                 "constraint_value": f"{height_val}m",
+                "height_meters": height_val,
                 "centroid": [centroid[0] if len(centroid) > 0 else 0,
-                             round(y_limit, 4),
+                             round(y_limit / 2, 4),
                              centroid[2] if len(centroid) > 2 else 0],
-                "y_bottom": round(y_limit, 4),
+                "y_bottom": 0,
                 "y_top": round(y_limit, 4),
+                "footprint_ground": [
+                    [pt[0], 0, pt[2]] if is_3d else [pt[0], 0, pt[1] if len(pt) > 1 else 0]
+                    for pt in bldg_pts
+                ],
+                "corner_posts": [
+                    {
+                        "base": [pt[0], 0, pt[2]] if is_3d else [pt[0], 0, pt[1] if len(pt) > 1 else 0],
+                        "top": [pt[0], round(y_limit, 4), pt[2]] if is_3d else [pt[0], round(y_limit, 4), pt[1] if len(pt) > 1 else 0],
+                    }
+                    for pt in bldg_pts[:8]  # Limit to 8 corners
+                ],
                 "marker_labels": [],
             })
 

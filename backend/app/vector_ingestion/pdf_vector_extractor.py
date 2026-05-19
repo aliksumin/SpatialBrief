@@ -16,6 +16,7 @@ from app.vector_ingestion.hierarchy_builder import (
     extract_subzones_adaptive, sample_fill_colours, discover_hierarchy,
 )
 from app.vector_ingestion.ai_vision_classifier import classify_polygons_with_vision
+from app.vector_ingestion.ensemble_classifier import classify_polygons_ensemble
 
 log = logging.getLogger(__name__)
 
@@ -1139,6 +1140,7 @@ DEFAULT_COLORS = {
     "overlapping_zone": "#a855f7", "filled_zone": "#fb923c",
     "minor_context": "#475569", "uncategorized_zone": "#f97316",
     "traffic_zone": "#64748b", "no_build_zone": "#ef4444",
+    "plinth": "#d97706",
 }
 
 # No Y-tier offsets — all geometry on flat ground plane (y=0)
@@ -1400,7 +1402,19 @@ def extract_vectors_from_pdf(
     pdf_path: str,
     gemini_api_key: Optional[str] = None,
     gemini_model: Optional[str] = None,
+    agent_models: Optional[Dict[str, Optional[str]]] = None,
+    site_brief: Optional[Dict[str, Any]] = None,
+    text_blocks: Optional[List[Dict[str, Any]]] = None,
+    units_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """
+    Node 5 — Extract Vector Geometry.
+
+    Accepts pre-computed data from upstream pipeline stages:
+      - site_brief:   from Node 3 (Extract Programme)
+      - text_blocks:  from Node 3 (Extract Programme)
+      - units_info:   from Node 4 (Detect Units & Coordinates)
+    """
     if not os.path.exists(pdf_path):
         return {"error": f"File not found: {pdf_path}"}
     doc = fitz.open(pdf_path)
@@ -1465,16 +1479,30 @@ def extract_vectors_from_pdf(
         polys = _extract_marker_labels(markers, polys, page)
         polys = _simplify_polygons(polys)
 
-        # ── AI Vision Classification (when API key available) ──
+        # ── AI Ensemble Classification (when API key available) ──
+        # site_brief is injected from Node 3 (Extract Programme)
         classification_mode = "rule_based"
         ai_error_detail = None
         if gemini_api_key:
-            log.info("Stage AI: Running vision-based classification...")
+            log.info("Stage AI: Running multi-agent ensemble classification...")
             log.info("Stage AI: API key present (first 8 chars: %s...)", gemini_api_key[:8])
+            resolved_model = gemini_model or "gemini-2.5-flash"
+
+            if site_brief:
+                log.info("Stage AI: Using site brief from Node 3 (%d zones, %d buildings expected)",
+                         site_brief.get("expected_buildable_zones", 0),
+                         site_brief.get("expected_building_count", 0))
+
             try:
-                polys = classify_polygons_with_vision(
+                am = agent_models or {}
+                polys = classify_polygons_ensemble(
                     polys, page, pa, gemini_api_key,
-                    model_name=gemini_model or "gemini-2.5-flash",
+                    model_name=resolved_model,
+                    model_visual=am.get("visual"),
+                    model_geometric=am.get("geometric"),
+                    model_contextual=am.get("contextual"),
+                    model_judge=am.get("judge"),
+                    site_brief=site_brief,
                 )
                 # Check if SDK was missing (not an API error, just not installed)
                 if any(p.get("_ai_sdk_missing") for p in polys):
@@ -1488,19 +1516,19 @@ def extract_vectors_from_pdf(
                     ai_error_detail = next(
                         (p["_ai_error"] for p in polys if p.get("_ai_error")), None
                     )
-                    log.error("AI Vision API error: %s", ai_error_detail)
+                    log.error("AI Ensemble error: %s", ai_error_detail)
                     for p in polys:
                         p.pop("_ai_error", None)
                 # Check if any polygon got AI tags
                 elif any(p.get("_ai_zone_type") or p.get("_is_artifact") for p in polys):
-                    classification_mode = "ai_vision"
+                    classification_mode = "ai_ensemble"
                 else:
                     classification_mode = "rule_based_fallback"
-                    log.warning("AI Vision returned no classifications — falling back")
+                    log.warning("AI Ensemble returned no classifications — falling back")
             except Exception as e:
                 classification_mode = "rule_based_fallback"
                 ai_error_detail = str(e)
-                log.error("AI Vision failed: %s — falling back to rules", e)
+                log.error("AI Ensemble failed: %s — falling back to rules", e)
         else:
             classification_mode = "rule_based_no_key"
 
@@ -1508,7 +1536,7 @@ def extract_vectors_from_pdf(
         classified = _classify_zones(polys, pa)
 
         # Apply AI overrides if vision classification was run
-        if classification_mode == "ai_vision":
+        if classification_mode in ("ai_vision", "ai_ensemble"):
             for z in classified:
                 ai_type = z.get("_ai_zone_type")
                 if ai_type:
@@ -1625,6 +1653,8 @@ def extract_vectors_from_pdf(
         "zone_summary": zt,
         "classification_mode": classification_mode if vectors else "no_pages",
     }
+    if site_brief:
+        result["site_brief"] = site_brief
     if ai_error_detail:
         result["ai_error_detail"] = ai_error_detail
     return result

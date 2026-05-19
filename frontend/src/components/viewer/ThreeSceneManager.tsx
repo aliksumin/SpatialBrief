@@ -437,6 +437,146 @@ function InfraLine({ vec, color, opacity }: { vec: any; color: string; opacity: 
   );
 }
 
+/* ────── Height Limit 3D Envelope — clean, minimal visualization ────── */
+function HeightLimitVolume({ vec, color, opacity, selected, onSelect }: { vec: any; color: string; opacity: number; selected: boolean; onSelect: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  const ceilingRef = useRef<THREE.MeshBasicMaterial>(null);
+  const pulseRef = useRef(0);
+
+  // Gentle breathing animation on ceiling opacity
+  useFrame((_, delta) => {
+    pulseRef.current += delta * 0.8;
+    if (ceilingRef.current) {
+      const base = selected ? 0.25 : hovered ? 0.18 : 0.10;
+      const pulse = Math.sin(pulseRef.current) * 0.03;
+      ceilingRef.current.opacity = (base + pulse) * opacity;
+    }
+  });
+
+  const { ceilingGeo, topRing, verticals, heightLabel, yTop } = useMemo(() => {
+    const yTop = vec.y_top ?? 0;
+    const heightM = vec.height_meters ?? 0;
+    const cornerPosts = vec.corner_posts || [];
+    const pts = vec.points || [];
+
+    if (pts.length < 3) return { ceilingGeo: null, topRing: null, verticals: [], heightLabel: '', yTop: 0 };
+
+    // Build ceiling geometry from top ring points
+    let pts2d: [number, number][] = [];
+    const seen = new Set<string>();
+    for (const p of pts) {
+      const key = `${p[0].toFixed(3)}_${p[2].toFixed(3)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        pts2d.push([p[0], p[2]]);
+      }
+    }
+    if (pts2d.length < 3) return { ceilingGeo: null, topRing: null, verticals: [], heightLabel: '', yTop: 0 };
+
+    // Ensure CCW
+    let shoelace = 0;
+    for (let i = 0; i < pts2d.length; i++) {
+      const j = (i + 1) % pts2d.length;
+      shoelace += pts2d[i][0] * pts2d[j][1] - pts2d[j][0] * pts2d[i][1];
+    }
+    if (shoelace < 0) pts2d.reverse();
+
+    let ceilingGeo: THREE.ShapeGeometry | null = null;
+    try {
+      const shape = new THREE.Shape();
+      shape.moveTo(pts2d[0][0], pts2d[0][1]);
+      for (let i = 1; i < pts2d.length; i++) shape.lineTo(pts2d[i][0], pts2d[i][1]);
+      shape.closePath();
+
+      const shapeGeo = new THREE.ShapeGeometry(shape);
+      const pos = shapeGeo.getAttribute('position');
+      for (let i = 0; i < pos.count; i++) {
+        const sx = pos.getX(i);
+        const sy = pos.getY(i);
+        pos.setXYZ(i, sx, yTop, sy);
+      }
+      pos.needsUpdate = true;
+      shapeGeo.computeVertexNormals();
+      ceilingGeo = shapeGeo;
+    } catch { /* ignore */ }
+
+    // Top ring (closed)
+    const topRing: [number, number, number][] = pts.map((p: number[]) => [p[0], p[1], p[2]] as [number, number, number]);
+    if (topRing.length > 0 && (topRing[0][0] !== topRing[topRing.length-1][0] || topRing[0][2] !== topRing[topRing.length-1][2])) {
+      topRing.push(topRing[0]);
+    }
+
+    // Thin vertical edges at corners (just lines, no decorations)
+    const verticals: [number, number, number][][] = cornerPosts.slice(0, 6).map((cp: any) => [
+      cp.base as [number, number, number],
+      cp.top as [number, number, number],
+    ]);
+
+    const heightLabel = heightM > 0 ? `↕ ${heightM}m` : vec.constraint_value || '';
+
+    return { ceilingGeo, topRing, verticals, heightLabel, yTop };
+  }, [vec]);
+
+  if (!topRing || topRing.length < 3) {
+    return <BoundaryOutline vec={vec} color={color} opacity={opacity} selected={selected} onSelect={onSelect} />;
+  }
+
+  const ringW = selected ? 2.2 : hovered ? 1.8 : 1.2;
+  const ringOp = (selected ? 0.9 : hovered ? 0.75 : 0.55) * opacity;
+  const edgeOp = (selected ? 0.5 : hovered ? 0.35 : 0.2) * opacity;
+
+  return (
+    <group onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+
+      {/* Translucent ceiling plane — breathing pulse */}
+      {ceilingGeo && (
+        <mesh geometry={ceilingGeo}>
+          <meshBasicMaterial ref={ceilingRef} color={color} transparent opacity={0.10 * opacity}
+            side={THREE.DoubleSide} depthWrite={false}
+            polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
+        </mesh>
+      )}
+
+      {/* Top ring outline */}
+      <Line points={topRing} color={color} lineWidth={ringW} transparent opacity={ringOp} />
+
+      {/* Thin dashed vertical edges — architectural wireframe feel */}
+      {verticals.map((vl, i) => (
+        <Line key={`ve-${i}`} points={vl} color={color} lineWidth={0.8}
+          transparent opacity={edgeOp}
+          dashed dashScale={15} dashSize={0.8} gapSize={0.4} />
+      ))}
+
+      {/* Selection glow on ceiling */}
+      {selected && ceilingGeo && (
+        <mesh geometry={ceilingGeo} position={[0, 0.01, 0]}>
+          <meshBasicMaterial color="#ffffff" transparent opacity={0.05}
+            side={THREE.DoubleSide} depthWrite={false} />
+        </mesh>
+      )}
+
+      {/* Single height badge — only on hover or select */}
+      {(hovered || selected) && vec.centroid && heightLabel && (
+        <Html position={[vec.centroid[0], yTop + 0.6, vec.centroid[2]]}
+          center style={{ pointerEvents: 'none' }}>
+          <div style={{
+            background: 'rgba(245,158,11,0.9)',
+            color: '#fff', fontWeight: 600, fontSize: '10px',
+            fontFamily: 'Inter, system-ui, sans-serif',
+            padding: '2px 8px', borderRadius: '4px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+            whiteSpace: 'nowrap', letterSpacing: '0.5px',
+            backdropFilter: 'blur(4px)',
+          }}>
+            {heightLabel}
+          </div>
+        </Html>
+      )}
+    </group>
+  );
+}
+
 /* ────── Volume box — extruded floor polygon ────── */
 function VolumeBox({ vec, color, opacity, selected, onSelect }: { vec: any; color: string; opacity: number; selected: boolean; onSelect: () => void }) {
   const [hovered, setHovered] = useState(false);
@@ -601,7 +741,7 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
 
   const getOpacity = (defaultOpacity: number = 1.0) => {
     if (selectedNode === null) return defaultOpacity;
-    if (selectedNode >= 6) return defaultOpacity;
+    if (selectedNode >= 5) return defaultOpacity;
     return defaultOpacity * 0.05;
   };
 
@@ -712,7 +852,7 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
           <OriginCross />
           <AutoFitCamera vectors={vectors} />
 
-          {activeNode >= 6 && (
+          {activeNode >= 5 && (
             <group>
               {/* Boundaries — outline only */}
               {visibleLayers.BOUNDARIES && categorized.boundaries.map((vec: any, idx: number) => {
@@ -745,9 +885,15 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
                 );
               })}
 
-              {/* Constraints — dashed setback/height lines */}
+              {/* Constraints — height limits get the premium 3D treatment */}
               {visibleLayers.CONSTRAINTS && categorized.constraints.map((vec: any, idx: number) => {
                 const color = vec.color_hint || ZONE_COLORS[vec.zone_type] || '#ef4444';
+                if (vec.zone_type === 'height_limit') {
+                  return (
+                    <HeightLimitVolume key={`cst-${idx}`} vec={vec} color={color} opacity={getOpacity(0.85)}
+                      selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
+                  );
+                }
                 return (
                   <BoundaryOutline key={`cst-${idx}`} vec={vec} color={color} opacity={getOpacity(0.85)}
                     selected={selectedVectorId === vec.id} onSelect={() => handleSelectVector(vec)} />
@@ -771,7 +917,7 @@ export const ThreeSceneManager: React.FC<ThreeSceneProps> = ({ selectedNode, act
             </group>
           )}
 
-          {vectors.length === 0 && activeNode >= 6 && (
+          {vectors.length === 0 && activeNode >= 5 && (
             <Html position={[0, 5, 0]} center>
               <div style={{ color: '#64748b', background: 'rgba(255,255,255,0.85)', padding: '1rem 1.5rem', borderRadius: '10px', fontSize: '0.85rem', boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
                 No vectors extracted yet.

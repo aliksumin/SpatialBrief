@@ -5,6 +5,7 @@ import shutil
 import os
 
 from app.vector_ingestion.pdf_vector_extractor import extract_vectors_from_pdf
+from app.vector_ingestion.pipeline_stages import run_extract_programme, run_detect_units
 from app.vector_ingestion.cad_extractor import extract_from_dwg
 from app.ai_agents.constraint_extractor import extract_constraints
 from app.ai_agents.programme_extractor import extract_programme
@@ -39,7 +40,17 @@ async def upload_files_only(files: List[UploadFile] = File(...)):
 
 @router.post("/process")
 async def run_pipeline(request: Request):
-    """Node 2+ — Run the full extraction pipeline on previously uploaded files."""
+    """
+    Run the full 9-node extraction pipeline on previously uploaded files.
+
+    Pipeline stages:
+      Node 2 — Classify Documents (implicit from file type)
+      Node 3 — Extract Programme (text, metadata, site brief)
+      Node 4 — Detect Units & Coordinates
+      Node 5 — Extract Vector Geometry (multi-agent ensemble)
+      Node 6 — Extract Constraints
+      Node 7 — Generate Volumes
+    """
     body = await request.json()
     filenames = body.get("filenames", [])
     if not filenames:
@@ -49,6 +60,11 @@ async def run_pipeline(request: Request):
     api_key = (request.headers.get("X-Gemini-Api-Key") or settings.GEMINI_API_KEY or "").strip() or None
     # Model: prefer header from frontend, fall back to default
     gemini_model = (request.headers.get("X-Gemini-Model") or "").strip() or None
+    # Per-agent model overrides for ensemble classifier
+    agent_visual_model = (request.headers.get("X-Agent-Visual-Model") or "").strip() or None
+    agent_geometric_model = (request.headers.get("X-Agent-Geometric-Model") or "").strip() or None
+    agent_contextual_model = (request.headers.get("X-Agent-Contextual-Model") or "").strip() or None
+    agent_judge_model = (request.headers.get("X-Agent-Judge-Model") or "").strip() or None
 
     extracted_geometry = []
     extracted_text_blocks = []
@@ -56,6 +72,7 @@ async def run_pipeline(request: Request):
     total_objects = 0
     classification_mode = "no_files"
     ai_error_detail = None
+    resolved_model = gemini_model or "gemini-2.5-flash"
 
     for filename in filenames:
         file_location = os.path.join(UPLOAD_DIR, filename)
@@ -64,12 +81,86 @@ async def run_pipeline(request: Request):
 
         filename_lower = filename.lower()
         if filename_lower.endswith('.pdf'):
-            result = extract_vectors_from_pdf(file_location, gemini_api_key=api_key, gemini_model=gemini_model)
+            import fitz
+            doc = fitz.open(file_location)
+            if len(doc) == 0:
+                doc.close()
+                continue
+
+            page = doc[0]
+            pw, ph = page.rect.width, page.rect.height
+            pa = pw * ph
+
+            # ── Node 3: Extract Programme ──
+            # Extract text, metadata, produce site brief with GFA targets,
+            # typology expectations, and binding rules for vector extraction.
+            # Get initial polygon outlines for the site brief analyser
+            from app.vector_ingestion.pdf_vector_extractor import (
+                _reconstruct_paths, _collect_boundary_zones,
+            )
+            raw_paths = _reconstruct_paths(page)
+            boundaries_prelim, _, _ = _collect_boundary_zones(raw_paths, pa)
+            # Build lightweight polygon list for site brief
+            from shapely.geometry import Polygon as ShapelyPolygon
+            prelim_polys = []
+            for b in boundaries_prelim:
+                sp = b.get("_shapely")
+                if sp:
+                    prelim_polys.append({
+                        "shapely_poly": sp,
+                        "area": b.get("_area", 0),
+                        "fill": b.get("fill"),
+                    })
+
+            loop = asyncio.get_event_loop()
+            programme_stage = await loop.run_in_executor(
+                None,
+                lambda: run_extract_programme(
+                    page, pa, prelim_polys,
+                    api_key=api_key,
+                    model_name=resolved_model,
+                ),
+            )
+
+            site_brief = programme_stage.get("site_brief")
+            node3_text_blocks = programme_stage.get("text_blocks", [])
+            extracted_text_blocks.extend([{"source": filename, **t} for t in node3_text_blocks])
+
+            # ── Node 4: Detect Units & Coordinates ──
+            units_info = run_detect_units(page, node3_text_blocks)
+
+            doc.close()
+
+            # ── Node 5: Extract Vector Geometry ──
+            # Multi-agent ensemble extraction using site_brief from Node 3
+            result = await loop.run_in_executor(
+                None,
+                lambda: extract_vectors_from_pdf(
+                    file_location,
+                    gemini_api_key=api_key,
+                    gemini_model=gemini_model,
+                    agent_models={
+                        "visual": agent_visual_model,
+                        "geometric": agent_geometric_model,
+                        "contextual": agent_contextual_model,
+                        "judge": agent_judge_model,
+                    },
+                    site_brief=site_brief,
+                    text_blocks=node3_text_blocks,
+                    units_info=units_info,
+                ),
+            )
+
             if "vectors" in result:
                 extracted_geometry.extend(result["vectors"])
                 total_objects += result.get("extracted_objects", 0)
             if "extracted_text" in result:
-                extracted_text_blocks.extend([{"source": filename, **t} for t in result["extracted_text"]])
+                # Merge any additional text from vector extraction
+                for t in result["extracted_text"]:
+                    t_with_source = {"source": filename, **t}
+                    # Avoid duplicates
+                    if t_with_source not in extracted_text_blocks:
+                        extracted_text_blocks.append(t_with_source)
             if "zone_summary" in result:
                 for zt, count in result["zone_summary"].items():
                     zone_summary[zt] = zone_summary.get(zt, 0) + count
@@ -77,6 +168,7 @@ async def run_pipeline(request: Request):
                 classification_mode = result["classification_mode"]
             if "ai_error_detail" in result:
                 ai_error_detail = result["ai_error_detail"]
+
         elif filename_lower.endswith('.dwg') or filename_lower.endswith('.dxf'):
             result = extract_from_dwg(file_location)
             if "vectors" in result:
@@ -89,9 +181,7 @@ async def run_pipeline(request: Request):
                     zone_summary[zt] = zone_summary.get(zt, 0) + count
             classification_mode = "rule_based"
 
-    # Run constraint extraction first, then programme extraction with
-    # the actual constraints so it respects height limits, setbacks, etc.
-    resolved_model = gemini_model or "gemini-2.5-flash"
+    # ── Node 6: Extract Constraints ──
     loop = asyncio.get_event_loop()
 
     constraint_result = await loop.run_in_executor(
@@ -104,6 +194,7 @@ async def run_pipeline(request: Request):
         ),
     )
 
+    # ── Node 3 continued: Extract Programme (with constraints) ──
     programme_result = await loop.run_in_executor(
         None,
         lambda: extract_programme(
@@ -118,7 +209,6 @@ async def run_pipeline(request: Request):
     # Merge constraint geometry into the main geometry list
     constraint_geometry = constraint_result.get("constraint_geometry", [])
     for cg in constraint_geometry:
-        # Ensure they have the fields the frontend expects
         cg.setdefault("area_pdf_units", 0)
         cg.setdefault("centroid", [0, 0, 0])
         cg.setdefault("filled", False)
@@ -126,14 +216,13 @@ async def run_pipeline(request: Request):
     extracted_geometry.extend(constraint_geometry)
     total_objects += len(constraint_geometry)
 
-    # Volume generation — floor-by-floor extrusion from footprints + programme
+    # ── Node 7: Generate Volumes ──
     volume_result = generate_volumes(
         zones=extracted_geometry,
         programmes=programme_result.get("programmes", []),
         constraints=constraint_result.get("constraints", []),
     )
 
-    # Add volume geometry to the main geometry list
     volume_geometry = volume_result.get("volumes", [])
     extracted_geometry.extend(volume_geometry)
     total_objects += len(volume_geometry)

@@ -395,7 +395,10 @@ def _try_rhino3dm_export(
     constraints: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[bytes]:
     """
-    Attempt to export as .3dm using rhino3dm.
+    Export as .3dm with:
+      - Proper sublayer hierarchy (parent::child) via ParentLayerId
+      - Comprehensive Rhino User Attributes on every object
+      - All constraint and programme metadata as UserStrings
     Returns bytes if successful, None if rhino3dm is not available.
     """
     try:
@@ -407,48 +410,133 @@ def _try_rhino3dm_export(
     try:
         model = rhino3dm.File3dm()
 
-        # Create layer hierarchy
-        layer_indices: Dict[str, int] = {}
+        # ── Create parent layer hierarchy ──
+        parent_layer_ids: Dict[str, str] = {}   # prefix → layer Id
+        parent_layer_indices: Dict[str, int] = {}  # prefix → layer index
 
+        for cat, prefix in CATEGORY_PREFIX.items():
+            parent_layer = rhino3dm.Layer()
+            parent_layer.Name = prefix
+            parent_layer.Color = (180, 180, 180, 255)
+            idx = model.Layers.Add(parent_layer)
+            # Retrieve the actual layer to get its Id
+            added_layer = model.Layers[idx]
+            parent_layer_ids[prefix] = str(added_layer.Id)
+            parent_layer_indices[prefix] = idx
+
+        # ── Create sublayers and track indices ──
+        sublayer_indices: Dict[str, int] = {}  # "00_Boundaries::Plot_Boundary" → index
+
+        def _get_or_create_sublayer(zone_type: str) -> int:
+            """Get (or create) the sublayer index for a zone type."""
+            cat = _categorize(zone_type)
+            prefix = CATEGORY_PREFIX[cat]
+            child_name = ZONE_LAYER_NAMES.get(zone_type, zone_type.replace(" ", "_"))
+            full_name = f"{prefix}::{child_name}"
+
+            if full_name in sublayer_indices:
+                return sublayer_indices[full_name]
+
+            child_layer = rhino3dm.Layer()
+            child_layer.Name = child_name
+            aci = ZONE_ACI_COLORS.get(zone_type, 7)
+            rgb = _aci_to_rgb(aci)
+            child_layer.Color = (rgb[0], rgb[1], rgb[2], 255)
+
+            # Set parent layer to create hierarchy
+            parent_id = parent_layer_ids.get(prefix)
+            if parent_id:
+                child_layer.ParentLayerId = parent_id
+
+            idx = model.Layers.Add(child_layer)
+            sublayer_indices[full_name] = idx
+            return idx
+
+        # ── Build constraint lookup for enriching object attributes ──
+        constraint_map: Dict[str, List[Dict]] = {}
+        if constraints:
+            for c in constraints:
+                cat = c.get("category", "")
+                if cat not in constraint_map:
+                    constraint_map[cat] = []
+                constraint_map[cat].append(c)
+
+        # ── Export all geometry objects ──
         for obj in geometry:
             zone_type = obj.get("zone_type", "unknown")
-            layer = _layer_name(zone_type)
-
-            if layer not in layer_indices:
-                rhino_layer = rhino3dm.Layer()
-                rhino_layer.Name = layer
-                aci = ZONE_ACI_COLORS.get(zone_type, 7)
-                # Map ACI to approximate RGB
-                rgb = _aci_to_rgb(aci)
-                rhino_layer.Color = (rgb[0], rgb[1], rgb[2], 255)
-                layer_indices[layer] = model.Layers.Add(rhino_layer)
-
             points = obj.get("points", [])
             if len(points) < 2:
                 continue
 
+            layer_idx = _get_or_create_sublayer(zone_type)
+
             attrs = rhino3dm.ObjectAttributes()
-            attrs.LayerIndex = layer_indices[layer]
+            attrs.LayerIndex = layer_idx
 
-            # Attach metadata as UserStrings
-            for key in [
-                "id", "zone_type", "zone_label", "confidence",
-                "classification_method", "building_id", "floor_index",
-                "use_type", "volume_type", "y_bottom", "y_top",
-            ]:
-                val = obj.get(key)
-                if val is not None:
-                    attrs.SetUserString(key, str(val))
+            # ── Attach comprehensive User Attributes ──
+            # Core identity
+            _set_user_string(attrs, "omrt_id", obj.get("id"))
+            _set_user_string(attrs, "zone_type", zone_type)
+            _set_user_string(attrs, "zone_label", obj.get("zone_label"))
+            _set_user_string(attrs, "confidence", obj.get("confidence"))
+            _set_user_string(attrs, "classification_method", obj.get("classification_method"))
+            _set_user_string(attrs, "source_layer", obj.get("source_layer"))
 
+            # Building metadata
+            _set_user_string(attrs, "building_id", obj.get("building_id"))
+            _set_user_string(attrs, "building_label", obj.get("building_label"))
+            _set_user_string(attrs, "area_pdf_units", obj.get("area_pdf_units"))
+
+            # Volume metadata
+            _set_user_string(attrs, "volume_type", obj.get("volume_type"))
+            _set_user_string(attrs, "floor_index", obj.get("floor_index"))
+            _set_user_string(attrs, "floor_label", obj.get("floor_label"))
+            _set_user_string(attrs, "use_type", obj.get("use_type"))
+            _set_user_string(attrs, "y_bottom", obj.get("y_bottom"))
+            _set_user_string(attrs, "y_top", obj.get("y_top"))
+
+            # Constraint metadata
+            _set_user_string(attrs, "constraint_name", obj.get("constraint_name"))
+            _set_user_string(attrs, "constraint_value", obj.get("constraint_value"))
+            _set_user_string(attrs, "constraint_unit", obj.get("constraint_unit"))
+            _set_user_string(attrs, "constraint_category", obj.get("constraint_category"))
+            _set_user_string(attrs, "height_meters", obj.get("height_meters"))
+
+            # Programme / GFA data (if embedded on the object)
+            _set_user_string(attrs, "gfa", obj.get("gfa"))
+            _set_user_string(attrs, "floors", obj.get("floors"))
+            _set_user_string(attrs, "has_plinth", obj.get("has_plinth"))
+            _set_user_string(attrs, "parking_ratio", obj.get("parking_ratio"))
+
+            # Attach relevant site-level constraints as attributes
+            if zone_type in ("sub_zone", "building_floor", "plinth"):
+                for cat_key in ("height", "setback", "density", "gfa"):
+                    cst_list = constraint_map.get(cat_key, [])
+                    for i, cst in enumerate(cst_list):
+                        suffix = f"_{i+1}" if i > 0 else ""
+                        _set_user_string(attrs, f"constraint_{cat_key}{suffix}",
+                                         f"{cst.get('value', '')} {cst.get('unit', '')}")
+                        _set_user_string(attrs, f"constraint_{cat_key}_name{suffix}",
+                                         cst.get("name"))
+
+            # Name the object for Rhino's properties panel
+            obj_name = obj.get("zone_label") or obj.get("building_label") or \
+                       ZONE_LAYER_NAMES.get(zone_type, zone_type)
+            attrs.Name = str(obj_name)[:255]
+
+            # ── Add geometry ──
             y_bottom = obj.get("y_bottom")
             y_top = obj.get("y_top")
 
             if y_bottom is not None and y_top is not None:
-                # 3D extrusion
                 _add_rhino_extrusion(model, obj, attrs, points, y_bottom, y_top)
             else:
-                # 2D polyline
                 _add_rhino_polyline(model, attrs, points, obj.get("closed", False))
+
+        # Log summary
+        log.info("[3DM Export] Created %d parent layers, %d sublayers, %d objects",
+                 len(parent_layer_indices), len(sublayer_indices),
+                 len(geometry))
 
         # Write to buffer
         buf = io.BytesIO()
@@ -457,7 +545,18 @@ def _try_rhino3dm_export(
 
     except Exception as e:
         log.error("[3DM Export] Failed: %s", e)
+        import traceback
+        log.debug("[3DM Export] Traceback:\n%s", traceback.format_exc())
         return None
+
+
+def _set_user_string(attrs: Any, key: str, value: Any) -> None:
+    """Safely set a Rhino UserString attribute, skipping None values."""
+    if value is not None:
+        try:
+            attrs.SetUserString(key, str(value))
+        except Exception:
+            pass
 
 
 def _add_rhino_polyline(model: Any, attrs: Any, points: List, closed: bool) -> None:

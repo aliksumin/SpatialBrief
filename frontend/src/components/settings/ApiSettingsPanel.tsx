@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Save, Zap, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { Save, Zap, CheckCircle, XCircle, Loader, ChevronDown, ChevronUp } from 'lucide-react';
 
 export const ApiSettingsPanel: React.FC = () => {
   // Migrate stale model names that don't exist in the API
@@ -19,6 +19,13 @@ export const ApiSettingsPanel: React.FC = () => {
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('geminiKey') || '');
   const [openaiKey, setOpenaiKey] = useState(localStorage.getItem('openaiKey') || '');
 
+  // Per-agent model overrides (default = '' means "use global model")
+  const [agentVisualModel, setAgentVisualModel] = useState(localStorage.getItem('agentVisualModel') || '');
+  const [agentGeometricModel, setAgentGeometricModel] = useState(localStorage.getItem('agentGeometricModel') || '');
+  const [agentContextualModel, setAgentContextualModel] = useState(localStorage.getItem('agentContextualModel') || '');
+  const [agentJudgeModel, setAgentJudgeModel] = useState(localStorage.getItem('agentJudgeModel') || '');
+  const [showAgentSettings, setShowAgentSettings] = useState(false);
+
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
 
@@ -28,6 +35,10 @@ export const ApiSettingsPanel: React.FC = () => {
     localStorage.setItem('openaiModel', openaiModel);
     localStorage.setItem('geminiKey', geminiKey.trim());
     localStorage.setItem('openaiKey', openaiKey.trim());
+    localStorage.setItem('agentVisualModel', agentVisualModel);
+    localStorage.setItem('agentGeometricModel', agentGeometricModel);
+    localStorage.setItem('agentContextualModel', agentContextualModel);
+    localStorage.setItem('agentJudgeModel', agentJudgeModel);
     alert('API Settings saved securely to local storage.');
   };
 
@@ -65,17 +76,23 @@ export const ApiSettingsPanel: React.FC = () => {
   };
 
   const googleModels = [
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Recommended)' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (Preview)' },
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
     { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
   ];
 
   const openaiModels = [
-    { value: 'gpt-5.5', label: 'GPT-5.5 (Recommended)' },
+    { value: 'gpt-5.5', label: 'GPT-5.5' },
     { value: 'gpt-5.5-pro', label: 'GPT-5.5 Pro' },
     { value: 'gpt-5.4', label: 'GPT-5.4' },
     { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+  ];
+
+  // Agent model options include "Use Global Model" as default
+  const agentModelOptions = [
+    { value: '', label: 'Use Global Model' },
+    ...googleModels,
   ];
 
   const selectStyle = {
@@ -87,6 +104,31 @@ export const ApiSettingsPanel: React.FC = () => {
     borderRadius: '8px',
     outline: 'none',
     appearance: 'none' as const,
+  };
+
+  const agentSelectStyle = {
+    ...selectStyle,
+    padding: '0.5rem 0.75rem',
+    fontSize: '0.8rem',
+  };
+
+  const agentSectionStyle = {
+    marginTop: '1rem',
+    padding: '0.75rem',
+    background: 'rgba(139, 92, 246, 0.06)',
+    border: '1px solid rgba(139, 92, 246, 0.15)',
+    borderRadius: '10px',
+  };
+
+  const agentLabelStyle = {
+    fontSize: '0.75rem',
+    color: 'var(--text-secondary)',
+    marginBottom: '0.25rem',
+    display: 'block' as const,
+  };
+
+  const agentRowStyle = {
+    marginBottom: '0.5rem',
   };
 
   return (
@@ -169,6 +211,68 @@ export const ApiSettingsPanel: React.FC = () => {
               {testMessage}
             </div>
           )}
+
+          {/* Ensemble Agent Model Overrides */}
+          <div style={agentSectionStyle}>
+            <button
+              onClick={() => setShowAgentSettings(!showAgentSettings)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-primary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                width: '100%',
+                padding: 0,
+                fontSize: '0.85rem',
+                fontWeight: 500,
+              }}
+            >
+              {showAgentSettings ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              Ensemble Agent Models
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginLeft: 'auto' }}>
+                Advanced
+              </span>
+            </button>
+
+            {showAgentSettings && (
+              <div style={{ marginTop: '0.75rem' }}>
+                <p style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '0.75rem', lineHeight: 1.4 }}>
+                  Override the model used by each classification agent. Leave as "Use Global Model" to follow the main model selection above.
+                </p>
+
+                <div style={agentRowStyle}>
+                  <label style={agentLabelStyle}>🔍 Visual Analyst</label>
+                  <select value={agentVisualModel} onChange={(e) => setAgentVisualModel(e.target.value)} style={agentSelectStyle}>
+                    {agentModelOptions.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                </div>
+
+                <div style={agentRowStyle}>
+                  <label style={agentLabelStyle}>📐 Geometric Analyst</label>
+                  <select value={agentGeometricModel} onChange={(e) => setAgentGeometricModel(e.target.value)} style={agentSelectStyle}>
+                    {agentModelOptions.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                </div>
+
+                <div style={agentRowStyle}>
+                  <label style={agentLabelStyle}>📋 Contextual Analyst</label>
+                  <select value={agentContextualModel} onChange={(e) => setAgentContextualModel(e.target.value)} style={agentSelectStyle}>
+                    {agentModelOptions.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                </div>
+
+                <div style={agentRowStyle}>
+                  <label style={agentLabelStyle}>⚖️ Judge</label>
+                  <select value={agentJudgeModel} onChange={(e) => setAgentJudgeModel(e.target.value)} style={agentSelectStyle}>
+                    {agentModelOptions.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
         </>
       )}
 

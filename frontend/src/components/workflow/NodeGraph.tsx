@@ -14,15 +14,13 @@ interface NodeGraphProps {
 const NODES = [
   { id: 1, title: 'Load Input Bundle', desc: 'Upload documents and CAD vectors', metrics: { files: 2 } },
   { id: 2, title: 'Classify Documents', desc: 'Determine file roles via AI', metrics: { roles: 2, conf: '98%' } },
-  { id: 3, title: 'Extract Metadata', desc: 'Parse text, tables and annotations', metrics: { entities: 15, labels: 42 } },
-  { id: 4, title: 'Detect Units & Coordinates', desc: 'Detect drawing scale and origin point', metrics: { unit: 'meters', crs: 'Local' } },
-  { id: 5, title: 'Separate Drawing Areas', desc: 'Analyse plot, envelopes, and no-build zones', metrics: { zones_identified: 3 } },
-  { id: 6, title: 'Extract Vector Geometry', desc: 'Reconstruct, close polylines and extract clean zones', metrics: { polygons: 3, open: 0, layers: 3 } },
-  { id: 7, title: 'Extract Constraints', desc: 'AI-powered setback, height & rule extraction', metrics: { constraints: 0, ai_sourced: 0 } },
-  { id: 8, title: 'Extract Programme', desc: 'GFA, uses, floors per building — AI fills gaps', metrics: { buildings: 0, uses: 0 } },
-  { id: 9, title: 'Generate Volumes', desc: '3D floor-by-floor volumes, plinths & parking', metrics: { volumes: 0, floors: 0 } },
-  { id: 10, title: 'Validation Report', desc: 'Summary of process', metrics: {} },
-  { id: 11, title: 'Export Package', desc: 'Rhino / Grasshopper handoff', metrics: {} }
+  { id: 3, title: 'Extract Programme', desc: 'Programme, GFA targets, metadata — formulate extraction tasks', metrics: { labels: 0, buildings: 0, uses: 0 } },
+  { id: 4, title: 'Detect Units & Coordinates', desc: 'Detect drawing scale, units and origin point', metrics: { unit: 'meters', crs: 'Local' } },
+  { id: 5, title: 'Extract Vector Geometry', desc: 'Multi-agent ensemble extraction of zones, buildings and boundaries', metrics: { polygons: 0, open: 0, layers: 0 } },
+  { id: 6, title: 'Extract Constraints', desc: 'AI-powered setback, height & rule extraction', metrics: { constraints: 0, ai_sourced: 0 } },
+  { id: 7, title: 'Generate Volumes', desc: '3D floor-by-floor volumes, plinths & parking', metrics: { volumes: 0, floors: 0 } },
+  { id: 8, title: 'Validation Report', desc: 'Summary of process', metrics: {} },
+  { id: 9, title: 'Export Package', desc: 'Rhino .3dm with sublayer hierarchy & User Attributes', metrics: {} }
 ];
 
 export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeChange, selectedNode, onSelectNode, activeNode, fileCount, extractionData }) => {
@@ -59,7 +57,6 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       });
       const data = await response.json();
       setUploadResult(data);
-      // Store filenames only (no geometry yet)
       onFilesUploaded(data);
       if(onNodeChange) onNodeChange(2);
     } catch (error) {
@@ -79,11 +76,11 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       return;
     }
 
-    // Node 2: Classify Documents (instant — determine file roles)
+    // Node 2: Classify Documents
     if(onNodeChange) onNodeChange(2);
     await new Promise(r => setTimeout(r, 400));
 
-    // Node 3: Extract Metadata + Annotations — triggers the full /process call
+    // Node 3: Extract Programme — triggers the full /process call
     if(onNodeChange) onNodeChange(3);
 
     try {
@@ -92,10 +89,15 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       if (geminiKey) headers['X-Gemini-Api-Key'] = geminiKey;
       const geminiModel = localStorage.getItem('googleModel')?.trim();
       if (geminiModel) headers['X-Gemini-Model'] = geminiModel;
+      const agentVisual = localStorage.getItem('agentVisualModel')?.trim();
+      if (agentVisual) headers['X-Agent-Visual-Model'] = agentVisual;
+      const agentGeometric = localStorage.getItem('agentGeometricModel')?.trim();
+      if (agentGeometric) headers['X-Agent-Geometric-Model'] = agentGeometric;
+      const agentContextual = localStorage.getItem('agentContextualModel')?.trim();
+      if (agentContextual) headers['X-Agent-Contextual-Model'] = agentContextual;
+      const agentJudge = localStorage.getItem('agentJudgeModel')?.trim();
+      if (agentJudge) headers['X-Agent-Judge-Model'] = agentJudge;
 
-      // Use AbortController with 300s timeout — the backend runs multiple
-      // sequential AI calls (vision + constraints + programme)
-      // which can take 60-150s total with powerful models.
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 300_000);
 
@@ -118,8 +120,8 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
 
       const result = await response.json();
 
-      // Pipeline data received — step through nodes showing progressive results
-      // Node 3 done: metadata + annotations extracted
+      // Pipeline data received — step through nodes
+      // Node 3 done: programme + metadata extracted
       onFilesUploaded(result);
       await new Promise(r => setTimeout(r, 500));
 
@@ -127,16 +129,12 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
       if(onNodeChange) onNodeChange(4);
       await new Promise(r => setTimeout(r, 400));
 
-      // Node 5: Separate Drawing Areas
+      // Node 5: Extract Vector Geometry (multi-agent ensemble)
       if(onNodeChange) onNodeChange(5);
-      await new Promise(r => setTimeout(r, 400));
-
-      // Node 6: Extract Vector Geometry (includes reconstruction)
-      if(onNodeChange) onNodeChange(6);
       await new Promise(r => setTimeout(r, 500));
 
-      // Nodes 7-11: step through remaining nodes
-      for (let i = 7; i <= 11; i++) {
+      // Nodes 6–9: Extract Constraints → Generate Volumes → Validation → Export
+      for (let i = 6; i <= 9; i++) {
         if(onNodeChange) onNodeChange(i);
         await new Promise(r => setTimeout(r, 400));
       }
@@ -156,7 +154,6 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
     try {
       setIsProcessing(true);
 
-      // Gather geometry data from the current project
       const geometry = extractionData?.geometry?.raw_vector_objects || [];
       const constraints = extractionData?.geometry?.constraints || [];
 
@@ -166,7 +163,6 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
         return;
       }
 
-      // 1. Export DXF via backend
       const response = await fetch('http://localhost:8200/api/v1/export/rhino', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -174,7 +170,7 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
           geometry,
           constraints,
           project_name: 'SpatialBrief Export',
-          format: 'dxf',
+          format: '3dm',
         }),
       });
 
@@ -182,64 +178,26 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
         throw new Error(`Export failed: ${response.statusText}`);
       }
 
-      // Download the DXF file
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
+      const filename = filenameMatch ? filenameMatch[1] : 'zoning_massing.3dm';
+      const is3dm = filename.endsWith('.3dm');
+
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'zoning_massing.dxf';
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      // 2. Also export design_inputs.json with real data
-      const constraintParams: Record<string, any> = {};
-      if (constraints.length > 0) {
-        for (const c of constraints) {
-          const key = (c.name || c.category || 'constraint').replace(/\s+/g, '_');
-          constraintParams[key] = { value: c.value, unit: c.unit, category: c.category };
-        }
-      }
-
-      const programmes = extractionData?.geometry?.programmes || [];
-      const exportData = {
-        metadata: {
-          project: 'SpatialBrief Export',
-          generator: 'OMRT Vector Engine',
-          timestamp: new Date().toISOString(),
-          total_objects: geometry.length,
-          total_constraints: constraints.length,
-          classification_mode: extractionData?.classification_mode || 'unknown',
-        },
-        constraints: constraintParams,
-        programmes: programmes.map((p: any) => ({
-          building_id: p.building_id,
-          building_label: p.building_label,
-          floors: p.floors,
-          floor_height: p.floor_height,
-          total_height: p.total_height,
-          uses: p.uses,
-        })),
-        layer_hierarchy: [
-          '00_Boundaries', '01_Zones', '02_Buildings',
-          '03_Constraints', '04_Generated_Volumes', '05_Infrastructure',
-        ],
-      };
-
-      const jsonBlob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-      const jsonUrl = URL.createObjectURL(jsonBlob);
-      const jsonA = document.createElement('a');
-      jsonA.href = jsonUrl;
-      jsonA.download = 'design_inputs.json';
-      document.body.appendChild(jsonA);
-      jsonA.click();
-      document.body.removeChild(jsonA);
-      URL.revokeObjectURL(jsonUrl);
-
-      if(onNodeChange) onNodeChange(11);
+      if(onNodeChange) onNodeChange(9);
       setIsProcessing(false);
-      alert(`Export complete!\n\nDownloaded:\n• zoning_massing.dxf — Layered geometry for Rhino\n• design_inputs.json — Constraints & programme data\n\nOpen the .dxf in Rhino to see all layers and metadata.`);
+
+      const formatName = is3dm ? '.3dm (Rhino)' : '.dxf (Rhino-compatible)';
+      alert(`Export complete!\n\nDownloaded:\n• ${filename} — ${formatName}\n\nLayer hierarchy with sublayers and Rhino User Attributes are embedded in the file.\nOpen in Rhino to see all layers, object names, and attributes.`);
 
     } catch (err: any) {
       console.error('Export failed:', err);
@@ -258,8 +216,8 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
         let statusColor = 'var(--border-color)';
         if (isDone) statusColor = 'var(--node-done)';
         if (isActive) statusColor = 'var(--accent-color)';
-        if (isDone && node.error) statusColor = 'var(--node-error, #ef4444)';
-        else if (isDone && node.warning) statusColor = 'var(--node-warning, #f59e0b)';
+        if (isDone && (node as any).error) statusColor = 'var(--node-error, #ef4444)';
+        else if (isDone && (node as any).warning) statusColor = 'var(--node-warning, #f59e0b)';
         
         const isSelected = selectedNode === node.id;
 
@@ -303,34 +261,33 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                       if (node.id === 1 && k === 'files') displayValue = String(fileCount);
                       if (node.id === 2 && k === 'roles') displayValue = String(fileCount);
                     }
-                    // Dynamic metrics for extraction nodes
                     if (extractionData) {
                       const geo = extractionData.geometry || extractionData;
                       const vecs = geo?.raw_vector_objects || [];
                       const texts = geo?.extracted_text || [];
                       const csts = geo?.constraints || [];
-                      if (node.id === 3 && k === 'labels') displayValue = String(texts.length);
-                      if (node.id === 6 && k === 'polygons') displayValue = String(vecs.filter((v: any) => v.closed).length);
-                      if (node.id === 6 && k === 'open') displayValue = String(vecs.filter((v: any) => !v.closed).length);
-                      if (node.id === 6 && k === 'layers') {
-                        const types = new Set(vecs.map((v: any) => v.zone_type));
-                        displayValue = String(types.size);
-                      }
-                      if (node.id === 5 && k === 'zones_identified') {
-                        const types = new Set(vecs.map((v: any) => v.zone_type));
-                        displayValue = String(types.size);
-                      }
-                      if (node.id === 7 && k === 'constraints') displayValue = String(csts.length);
-                      if (node.id === 7 && k === 'ai_sourced') displayValue = String(csts.filter((c: any) => c.source === 'ai_extracted' || c.source === 'ai_suggested').length);
                       const progs = geo?.programmes || [];
                       const vols = geo?.volumes || [];
-                      if (node.id === 8 && k === 'buildings') displayValue = String(progs.length);
-                      if (node.id === 8 && k === 'uses') {
+                      // Node 3 — Extract Programme
+                      if (node.id === 3 && k === 'labels') displayValue = String(texts.length);
+                      if (node.id === 3 && k === 'buildings') displayValue = String(progs.length);
+                      if (node.id === 3 && k === 'uses') {
                         const allUses = new Set(progs.flatMap((p: any) => (p.uses || []).map((u: any) => u.use)));
                         displayValue = String(allUses.size);
                       }
-                      if (node.id === 9 && k === 'volumes') displayValue = String(vols.length);
-                      if (node.id === 9 && k === 'floors') {
+                      // Node 5 — Extract Vector Geometry
+                      if (node.id === 5 && k === 'polygons') displayValue = String(vecs.filter((v: any) => v.closed).length);
+                      if (node.id === 5 && k === 'open') displayValue = String(vecs.filter((v: any) => !v.closed).length);
+                      if (node.id === 5 && k === 'layers') {
+                        const types = new Set(vecs.map((v: any) => v.zone_type));
+                        displayValue = String(types.size);
+                      }
+                      // Node 6 — Extract Constraints
+                      if (node.id === 6 && k === 'constraints') displayValue = String(csts.length);
+                      if (node.id === 6 && k === 'ai_sourced') displayValue = String(csts.filter((c: any) => c.source === 'ai_extracted' || c.source === 'ai_suggested').length);
+                      // Node 7 — Generate Volumes
+                      if (node.id === 7 && k === 'volumes') displayValue = String(vols.length);
+                      if (node.id === 7 && k === 'floors') {
                         displayValue = String(vols.filter((v: any) => v.zone_type === 'building_floor').length);
                       }
                     }
@@ -344,14 +301,14 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
               )}
 
               {/* Warnings and Errors */}
-              {isDone && node.warning && (
+              {isDone && (node as any).warning && (
                 <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--node-warning, #f59e0b)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                  <AlertTriangle size={14} /> {node.warning}
+                  <AlertTriangle size={14} /> {(node as any).warning}
                 </div>
               )}
-              {isDone && node.error && (
+              {isDone && (node as any).error && (
                 <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--node-error, #ef4444)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                  <XCircle size={14} /> {node.error}
+                  <XCircle size={14} /> {(node as any).error}
                 </div>
               )}
 
@@ -398,9 +355,8 @@ export const NodeGraph: React.FC<NodeGraphProps> = ({ onFilesUploaded, onNodeCha
                 </button>
               )}
 
-
-              {/* Node 11 Manual Export */}
-              {node.id === 11 && isActive && !isProcessing && (
+              {/* Node 9 Manual Export */}
+              {node.id === 9 && isActive && !isProcessing && (
                 <button className="btn" onClick={handleExport} style={{ marginTop: '1rem', width: '100%', background: '#10b981' }}>
                   <Download size={16} /> Export Rhino/GH Package
                 </button>

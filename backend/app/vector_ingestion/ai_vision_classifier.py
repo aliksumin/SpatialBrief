@@ -39,6 +39,7 @@ VALID_ZONE_TYPES = {
     "no_build_zone",
     "restriction_line",
     "artifact",
+    "plinth",
 }
 
 
