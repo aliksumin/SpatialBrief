@@ -1206,7 +1206,7 @@ def _min_area_bbox_angle(pts_2d):
     return best_angle
 
 
-def _auto_orient(zones, pw, ph, scale=0.1):
+def _auto_orient(zones, pw, ph, scale=0.1764):
     """Auto-orient all geometry:
     1. Center on page midpoint
     2. Map directly: X = pdf_x (rightward), Z = pdf_y (downward in PDF)
@@ -1253,7 +1253,7 @@ def _auto_orient(zones, pw, ph, scale=0.1):
     return zones, 0.0
 
 
-def _normalize(zones, pw, ph, scale=0.1):
+def _normalize(zones, pw, ph, scale=0.1764):
     zones, orient_angle = _auto_orient(zones, pw, ph, scale)
 
     out = []
@@ -1262,11 +1262,16 @@ def _normalize(zones, pw, ph, scale=0.1):
         pts3 = [[round(rx, 4), 0, round(rz, 4)] for rx, rz in z["_rot2d"]]
         ct3 = [round(z["_cen_rot"][0], 4), 0, round(z["_cen_rot"][1], 4)]
 
+        # Area in m²: original area (PDF units²) × scale²
+        area_m2 = z["area"] * (scale ** 2)
+
         color = z.get("color_hex") or DEFAULT_COLORS.get(z["zone_type"], "#94a3b8")
         out.append({
             "id": z["id"], "type": "Polygon" if z["closed"] else "Polyline",
             "zone_type": z["zone_type"], "points": pts3, "closed": z["closed"],
-            "area_pdf_units": round(z["area"], 1), "centroid": ct3,
+            "area_pdf_units": round(z["area"], 1),
+            "area_m2": round(area_m2, 1),
+            "centroid": ct3,
             "color_hint": color, "stroke_width": z["width"],
             "confidence": round(z["confidence"], 2),
             "classification_method": z["classification_method"],
@@ -1651,10 +1656,12 @@ def extract_vectors_from_pdf(
             if rect_ids:
                 meaningful = [z for z in meaningful if z["id"] not in rect_ids]
 
-        vectors = _normalize(meaningful, pw, ph)
+        # Use meters_per_pdf_point from units_info (default 0.1764 for 1:500)
+        norm_scale = (units_info or {}).get("meters_per_pdf_point", 0.1764)
+        vectors = _normalize(meaningful, pw, ph, scale=norm_scale)
 
         # Text extraction for metadata panel
-        scale = 0.1
+        scale = norm_scale
         plot_bbox = None
         for v in vectors:
             if v["zone_type"] == "plot_boundary":

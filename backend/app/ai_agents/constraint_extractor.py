@@ -554,7 +554,7 @@ def _generate_constraint_geometry(
     3. Buildable envelope boundary — derived from existing zones when
        no explicit setback values were found
 
-    Returns a list of geometry dicts ready for the viewport.
+    Returns a list of geometry dicts (all coordinates in meters).
     """
     geometry: List[Dict[str, Any]] = []
 
@@ -618,15 +618,8 @@ def _generate_constraint_geometry(
                         from shapely.validation import make_valid
                         poly = make_valid(poly)
 
-                    coords = list(poly.exterior.coords)
-                    xs = [c[0] for c in coords]
-                    zs = [c[1] for c in coords]
-                    span = max(max(xs) - min(xs), max(zs) - min(zs), 1)
-
-                    viewport_offset = offset_dist * (span / 100.0)
-                    viewport_offset = max(viewport_offset, 0.3)
-
-                    offset_poly = poly.buffer(-viewport_offset, join_style=2)
+                    # Buffer inward by offset distance (meters — same unit as XZ coordinates)
+                    offset_poly = poly.buffer(-offset_dist, join_style=2)
                     if offset_poly.is_empty:
                         continue
 
@@ -706,10 +699,9 @@ def _generate_constraint_geometry(
         max_height_cst = max(height_constraints, key=lambda c: c["value"])
         height_val = max_height_cst["value"]
 
-        # Scale: viewport Y maps from PDF coordinates via 0.1 scale,
-        # but heights in meters need their own mapping.
-        # Use a reasonable heuristic: 1m ≈ 0.3 viewport units
-        y_limit = height_val * 0.3
+        # Scale: XZ coordinates are now in real meters (via meters_per_pdf_point
+        # normalisation), so height values in meters can be used directly.
+        y_limit = height_val
 
         for bldg in buildings:
             bldg_pts = bldg.get("points", [])

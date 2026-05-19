@@ -34,12 +34,12 @@ USE_COLORS: Dict[str, str] = {
     "plinth": "#f97316",         # orange
 }
 
-# ── Default floor height if not specified ──
+# ── Default floor height if not specified (meters) ──
 DEFAULT_FLOOR_HEIGHT = 3.0
 DEFAULT_PLINTH_HEIGHT = 4.5
 DEFAULT_PARKING_DEPTH = 3.0
 
-# ── Max realistic footprint per building type (m² in viewport units) ──
+# ── Max realistic footprint per building type (m²) ──
 # Real buildings have limited footprint sizes. When a sub_zone footprint
 # exceeds these, we cap the effective area for floor count calculation
 # so the building gets taller instead of staying as a 1-2 floor slab.
@@ -92,7 +92,7 @@ def _create_floor_volume(
     volume_type: str,  # "building_floor", "plinth", "underground_parking"
     confidence: float = 0.75,
 ) -> Dict[str, Any]:
-    """Create a single floor volume as geometry for the viewport."""
+    """Create a single floor volume as 3D geometry (all coordinates in meters)."""
 
     bottom_pts = _offset_points_y(footprint, y_bottom)
     top_pts = _offset_points_y(footprint, y_top)
@@ -100,6 +100,14 @@ def _create_floor_volume(
     centroid_y = (y_bottom + y_top) / 2
 
     color = USE_COLORS.get(use_type, USE_COLORS.get(volume_type, "#94a3b8"))
+
+    # Compute footprint area (m²)
+    try:
+        from shapely.geometry import Polygon as SPoly
+        fp_2d = [(p[0], p[2] if len(p) > 2 else (p[1] if len(p) > 1 else 0)) for p in footprint]
+        area_m2 = round(SPoly(fp_2d).area, 1)
+    except Exception:
+        area_m2 = 0.0
 
     return {
         "id": f"vol_{uuid.uuid4().hex[:8]}",
@@ -123,6 +131,7 @@ def _create_floor_volume(
         "classification_method": "volume_generation",
         "filled": True,
         "area_pdf_units": 0,
+        "area_m2": area_m2,
         "source_layer": "volumes",
     }
 
@@ -184,14 +193,8 @@ def _derive_footprints_from_envelope(
                 setback_dist = c["value"]
 
     if setback_dist and setback_dist > 0:
-        # Scale setback into viewport coordinates
-        coords = list(poly.exterior.coords)
-        xs = [c[0] for c in coords]
-        zs = [c[1] for c in coords]
-        span = max(max(xs) - min(xs), max(zs) - min(zs), 1)
-        viewport_offset = setback_dist * (span / 100.0)
-        viewport_offset = max(viewport_offset, 0.3)
-        inset = poly.buffer(-viewport_offset, join_style=2)
+        # Buffer inward by setback distance (meters — same unit as XZ coordinates)
+        inset = poly.buffer(-setback_dist, join_style=2)
         if not inset.is_empty and inset.area > poly.area * 0.1:
             if hasattr(inset, 'exterior'):
                 poly = inset
@@ -281,6 +284,7 @@ def _derive_footprints_from_envelope(
                 "classification_method": f"derived_from_envelope ({method})",
                 "filled": False,
                 "area_pdf_units": round(scaled.area, 1),
+                "area_m2": round(scaled.area, 1),
                 "centroid": ct,
                 "stroke_width": 1.0,
                 "marker_labels": [],
@@ -288,11 +292,11 @@ def _derive_footprints_from_envelope(
                 "_target_floors": floors,
                 "_target_gfa": target_gfa,
             })
-            log.info("[Volumes/Derive] Created derived footprint: %.0f sq units (method=%s)",
+            log.info("[Volumes/Derive] Created derived footprint: %.0f m² (method=%s)",
                      scaled.area, method)
     else:
         # Apply a default setback inset (never use the full zone as-is)
-        default_inset = max(poly.length * 0.03, 2.0)  # ~3% of perimeter or 2 units
+        default_inset = max(poly.length * 0.03, 2.0)  # ~3% of perimeter or 2m minimum
         inset_poly = poly.buffer(-default_inset)
         if inset_poly.is_empty or not inset_poly.is_valid:
             inset_poly = poly  # fallback if inset collapses
@@ -332,6 +336,7 @@ def _derive_footprints_from_envelope(
             "classification_method": f"derived_from_envelope (inset_60pct)",
             "filled": False,
             "area_pdf_units": round(use_poly.area, 1),
+            "area_m2": round(use_poly.area, 1),
             "centroid": ct,
             "stroke_width": 1.0,
             "marker_labels": [],
@@ -339,7 +344,7 @@ def _derive_footprints_from_envelope(
             "_target_floors": floors,
             "_target_gfa": target_gfa,
         })
-        log.info("[Volumes/Derive] Inset envelope to 60%% coverage as footprint (%.0f sq units)",
+        log.info("[Volumes/Derive] Inset envelope to 60%% coverage as footprint (%.0f m²)",
                  use_poly.area)
 
     return derived
@@ -553,6 +558,8 @@ def generate_volumes(
     else:
         log.info("[Volumes] Height constraints found: %s → using most restrictive = %.1fm",
                  [f"{h:.0f}m" for h in all_heights], max_height_global)
+
+
 
     # ── Generate zone-level volumes: plinths + parking ──
     volumes: List[Dict[str, Any]] = []

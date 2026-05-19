@@ -160,11 +160,16 @@ def run_detect_units(
     """
     Stage 4: Detect drawing units, scale factor, and coordinate origin.
 
+    Computes `meters_per_pdf_point` — the conversion factor from PDF
+    coordinate space to real-world meters, based on the detected drawing
+    scale (e.g. 1:500).
+
     Returns:
-        unit:    detected unit string ('meters', 'millimeters', 'feet', etc.)
-        scale:   the normalisation scale factor
-        origin:  coordinate origin point [x, y]
-        crs:     coordinate reference system label
+        unit:                  detected unit string ('meters', etc.)
+        drawing_scale:         the detected drawing scale denominator (e.g. 500)
+        meters_per_pdf_point:  conversion factor for XZ coordinates
+        origin:                coordinate origin point [x, y]
+        crs:                   coordinate reference system label
     """
     import re
 
@@ -182,13 +187,26 @@ def run_detect_units(
     elif re.search(r"\b(?:inches?|in)\b", all_text):
         unit = "inches"
 
-    # Scale detection from common notation
-    scale = 0.1  # default normalisation scale
+    # Scale detection from common notation (e.g. "1:500", "1 : 1000")
+    drawing_scale = 500  # default: 1:500 (common for Dutch bestemmingsplan)
     scale_match = re.search(r"1\s*:\s*(\d+)", all_text)
     if scale_match:
         scale_val = int(scale_match.group(1))
         if 50 <= scale_val <= 10000:
-            log.info("[Node4] Detected drawing scale 1:%d", scale_val)
+            drawing_scale = scale_val
+            log.info("[Node4] Detected drawing scale 1:%d", drawing_scale)
+        else:
+            log.info("[Node4] Scale 1:%d out of range — using default 1:%d",
+                     scale_val, drawing_scale)
+    else:
+        log.info("[Node4] No scale annotation found — using default 1:%d", drawing_scale)
+
+    # Compute meters_per_pdf_point
+    # 1 PDF point = 1/72 inch = 0.3528 mm on paper
+    # At drawing scale 1:S, 1mm on paper = S mm real = S/1000 m real
+    # So: 1 PDF point = 0.3528mm × (S/1000) m = 0.0003528 × S meters
+    MM_PER_PDF_POINT = 25.4 / 72.0  # ≈ 0.3528 mm
+    meters_per_pdf_point = (MM_PER_PDF_POINT * drawing_scale) / 1000.0
 
     # CRS — typically 'Local' for zoning drawings
     crs = "Local"
@@ -198,12 +216,14 @@ def run_detect_units(
     # Origin = page center (used in normalisation)
     origin = [pw / 2, ph / 2]
 
-    log.info("[Node4] Units=%s, Scale=%.3f, CRS=%s, Origin=[%.1f, %.1f]",
-             unit, scale, crs, origin[0], origin[1])
+    log.info("[Node4] Units=%s, DrawingScale=1:%d, m/pt=%.4f, CRS=%s, Origin=[%.1f, %.1f]",
+             unit, drawing_scale, meters_per_pdf_point, crs, origin[0], origin[1])
 
     return {
         "unit": unit,
-        "scale": scale,
+        "drawing_scale": drawing_scale,
+        "meters_per_pdf_point": meters_per_pdf_point,
+        "scale": meters_per_pdf_point,   # backward compat
         "origin": origin,
         "crs": crs,
         "page_width": pw,

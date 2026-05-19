@@ -64,7 +64,7 @@ def _is_essential_text(text: str) -> bool:
 def _normalize_cad(vectors: list) -> list:
     """Post-process extracted CAD vectors to:
     1. Center geometry around origin
-    2. Scale to a reasonable viewport size
+    2. Preserve real-world coordinates (meters)
     3. Orient correctly (CAD Y-up → Three.js XZ ground plane)
     4. Output consistent format matching pdf_vector_extractor
     """
@@ -87,12 +87,9 @@ def _normalize_cad(vectors: list) -> list:
     cx = (min_x + max_x) / 2
     cz = (min_z + max_z) / 2
 
-    # Scale: normalize so the longest span fits within ~40 world units
-    span_x = max_x - min_x
-    span_z = max_z - min_z
-    max_span = max(span_x, span_z, 1.0)  # avoid divide-by-zero
-    target_size = 40.0
-    scale = target_size / max_span
+    # Preserve real-world coordinates (typically meters for architectural DWG/DXF).
+    # Only center around origin — no rescaling.
+    scale = 1.0
 
     out = []
     for v in vectors:
@@ -117,6 +114,16 @@ def _normalize_cad(vectors: list) -> list:
         color = DEFAULT_COLORS.get(zone_type, "#94a3b8")
         layer_name = v.get("layer", "")
 
+        # Compute area for closed polygons (coordinates in meters → area in m²)
+        area_m2 = 0.0
+        if closed and len(pts3) >= 3:
+            try:
+                from shapely.geometry import Polygon as SPoly
+                poly_2d = [(p[0], p[2]) for p in pts3]
+                area_m2 = round(SPoly(poly_2d).area, 1)
+            except Exception:
+                pass
+
         out.append({
             "id": f"cad_{uuid.uuid4().hex[:8]}",
             "type": "Polygon" if closed else "Polyline",
@@ -124,6 +131,7 @@ def _normalize_cad(vectors: list) -> list:
             "points": pts3,
             "closed": closed,
             "area_pdf_units": 0,
+            "area_m2": area_m2,
             "centroid": centroid,
             "color_hint": color,
             "stroke_width": 1.0,

@@ -6,8 +6,11 @@ SpatialBrief transforms zoning PDFs and CAD drawings into a structured analytica
 
 ## Requirements
 
-- **Python** 3.10+
+- **Python 3.13** (recommended) — required for `.3dm` export via `rhino3dm`
 - **Node.js** 18+
+
+> [!WARNING]
+> **Python 3.14+ is not supported** — the `rhino3dm` package does not have pre-built wheels for Python 3.14+, and building from source requires CMake + C++ toolchain. Use **Python 3.13** to ensure all features work out of the box. The install scripts (`install.bat` / `install.sh`) automatically use Python 3.13 via the `py` launcher.
 
 ### Quick Install
 
@@ -22,9 +25,10 @@ chmod +x install.sh && ./install.sh
 Or install manually:
 
 ```bash
-# Backend
+# Backend — use Python 3.13 explicitly
 cd backend
-python -m venv venv
+py -3.13 -m venv venv        # Windows (via py launcher)
+# python3.13 -m venv venv    # macOS/Linux
 venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt

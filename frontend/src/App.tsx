@@ -638,10 +638,14 @@ export default function App() {
                       <span className="vector-detail-value">{selectedVector.source_layer}</span>
                     </div>
                   )}
-                  {selectedVector.area_pdf_units > 0 && (
+                  {(selectedVector.area_m2 > 0 || selectedVector.area_pdf_units > 0) && (
                     <div className="vector-detail-item">
-                      <span className="vector-detail-label">Area (PDF units)</span>
-                      <span className="vector-detail-value">{selectedVector.area_pdf_units}</span>
+                      <span className="vector-detail-label">Area</span>
+                      <span className="vector-detail-value">
+                        {selectedVector.area_m2 > 0
+                          ? `${selectedVector.area_m2.toLocaleString()} m²`
+                          : selectedVector.area_pdf_units}
+                      </span>
                     </div>
                   )}
                 </div>
