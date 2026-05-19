@@ -39,6 +39,20 @@ DEFAULT_FLOOR_HEIGHT = 3.0
 DEFAULT_PLINTH_HEIGHT = 4.5
 DEFAULT_PARKING_DEPTH = 3.0
 
+# ── Max realistic footprint per building type (m² in viewport units) ──
+# Real buildings have limited footprint sizes. When a sub_zone footprint
+# exceeds these, we cap the effective area for floor count calculation
+# so the building gets taller instead of staying as a 1-2 floor slab.
+MAX_FOOTPRINT_BY_USE: Dict[str, float] = {
+    "residential": 1200.0,   # typical residential tower/block
+    "commercial": 2500.0,    # commercial/office building
+    "office": 2000.0,
+    "retail": 3000.0,        # retail can be larger (mall podium)
+    "mixed_use": 1800.0,
+    "industrial": 5000.0,    # factories can be large and low
+}
+DEFAULT_MAX_FOOTPRINT = 1500.0  # general fallback
+
 
 def _compute_centroid(points: List[List[float]]) -> List[float]:
     """Compute 2D centroid of a polygon (using x, z for 3D points)."""
@@ -565,8 +579,29 @@ def generate_volumes(
         # ── Plinth (only for plinth_tower typology) ──
         if typology == "plinth_tower":
             plinth_height = DEFAULT_PLINTH_HEIGHT
+            # Plinth should be an inset of the zone, not the full boundary
+            e_sp = env.get("_shapely")
+            plinth_pts = env_pts  # fallback to full envelope
+            if e_sp:
+                # Inset by ~10% of the zone perimeter for a realistic podium
+                inset_dist = max(e_sp.length * 0.04, 1.5)
+                inset = e_sp.buffer(-inset_dist, join_style=2)
+                if not inset.is_empty and inset.area > e_sp.area * 0.3:
+                    if hasattr(inset, 'exterior'):
+                        inset_poly = inset
+                    elif hasattr(inset, 'geoms'):
+                        inset_poly = max(inset.geoms, key=lambda g: g.area)
+                    else:
+                        inset_poly = None
+                    if inset_poly and hasattr(inset_poly, 'exterior'):
+                        is_3d = len(env_pts[0]) >= 3
+                        plinth_pts = [[round(c[0], 4), 0, round(c[1], 4)] if is_3d
+                                      else [round(c[0], 4), round(c[1], 4)]
+                                      for c in inset_poly.exterior.coords]
+                        log.info("[Volumes] Plinth inset: %.0f → %.0fm² (%.0f%%)",
+                                 e_sp.area, inset_poly.area, inset_poly.area / e_sp.area * 100)
             volumes.append(_create_floor_volume(
-                footprint=env_pts, y_bottom=0, y_top=plinth_height,
+                footprint=plinth_pts, y_bottom=0, y_top=plinth_height,
                 building_id=f"plinth_{env_id}",
                 building_label=f"Plinth ({env.get('zone_label', 'Mixed-Use')})",
                 floor_index=0, floor_label="Commercial Plinth",
@@ -666,21 +701,36 @@ def generate_volumes(
             blabel = prog.get("building_label", bldg.get("zone_label", f"Building {buildings_processed + 1}"))
             confidence = prog.get("confidence", 0.7)
         else:
-            # GFA-driven: floors = target_gfa / footprint_area
-            if zone_target_gfa and zone_target_gfa > 0 and footprint_area > 0:
+            # Determine building use for footprint cap
+            zp_use = zp.get("use", "residential") if zp else "residential"
+            max_fp = MAX_FOOTPRINT_BY_USE.get(zp_use, DEFAULT_MAX_FOOTPRINT)
+
+            # Cap the effective footprint for floor calculation
+            # (real buildings don't have 3000m² residential footprints)
+            effective_fp = min(footprint_area, max_fp)
+            if effective_fp < footprint_area:
+                log.info("[Volumes] Capping footprint for '%s': %.0f → %.0fm² (use=%s)",
+                         bldg.get("zone_label", bid), footprint_area, effective_fp, zp_use)
+
+            # GFA-driven: floors = target_gfa / effective_footprint
+            if zone_target_gfa and zone_target_gfa > 0 and effective_fp > 0:
                 # Count buildings in this zone to split GFA
                 bldgs_in_zone = sum(1 for b2id in buildings
                                     if bldg_parent_zone.get(b2id, {}).get("id") == parent_id)
                 bldgs_in_zone = max(bldgs_in_zone, 1)
                 gfa_per_building = zone_target_gfa / bldgs_in_zone
-                floors = max(1, math.ceil(gfa_per_building / footprint_area))
-                log.info("[Volumes] GFA-driven: '%s' → %.0fm² GFA / %.0fm² footprint / %d bldgs = %d floors",
-                         bldg.get("zone_label", bid), zone_target_gfa, footprint_area, bldgs_in_zone, floors)
+                floors = max(1, math.ceil(gfa_per_building / effective_fp))
+                log.info("[Volumes] GFA-driven: '%s' → %.0fm² GFA / %.0fm² eff.fp / %d bldgs = %d floors",
+                         bldg.get("zone_label", bid), zone_target_gfa, effective_fp, bldgs_in_zone, floors)
             elif effective_max_height:
                 available = effective_max_height - base_y
                 floors = max(1, int(available / floor_height))
             else:
                 floors = 4
+
+            # Minimum 3 floors for any building (realistic minimum)
+            if floors < 3 and zp_use not in ("industrial", "retail"):
+                floors = 3
 
             uses = []
             blabel = bldg.get("zone_label", f"Building {buildings_processed + 1}")

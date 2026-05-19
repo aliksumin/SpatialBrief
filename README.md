@@ -128,7 +128,7 @@ SpatialBrief processes documents through a 9-node pipeline:
 | 6 | **Extract Vector Geometry** | Multi-agent ensemble extraction of zones, buildings and boundaries (uses constraints as context) |
 | 7 | **Generate Volumes** | Floor-by-floor 3D massing with plinths and underground parking |
 | 8 | **Validation Report** | Summary and cross-validation of all pipeline outputs |
-| 9 | **Export Package** | Rhino .3dm export with sublayer hierarchy and User Attributes (DXF fallback) |
+| 9 | **Export Package** | Rhino .3dm export with sublayer hierarchy and User Attributes |
 
 ### Multi-Agent Pipeline & Data Flow
 
@@ -199,7 +199,6 @@ flowchart TB
 
     subgraph NODE9["⑨ Export Package"]
         RHINO["Rhino .3dm Exporter\n(sublayer hierarchy +\nUser Attributes)"]
-        DXF_EXP["DXF Fallback Export"]
     end
 
     %% Main pipeline flow
@@ -234,7 +233,7 @@ flowchart TB
     class PDF,DWG inputNode
     class DOC_AI,AI_PROG,AI_CST,VIS,CTX,JUDGE aiNode
     class REGEX_PROG,REGEX_CST,BRIEF,UNITS,ZONE_MAP,PDF_EXT,GEO,ZONE_PROG,DERIVE,VOL_GEN,ANNOT,VALID processNode
-    class RHINO,DXF_EXP outputNode
+    class RHINO outputNode
 ```
 
 ### Data Objects Passed Between Nodes
@@ -336,7 +335,7 @@ SpatialBrief/
 | Backend | FastAPI + Uvicorn (Python) |
 | AI | Google Gemini (vision + text) via `google-genai` SDK |
 | Geometry | Shapely + PyMuPDF + ezdxf |
-| Export | ezdxf (DXF fallback) + rhino3dm (.3dm with sublayers & User Attributes) |
+| Export | rhino3dm (.3dm with sublayers & User Attributes) |
 | Styling | Vanilla CSS with dark-mode design system |
 
 ## License
