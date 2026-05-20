@@ -281,6 +281,8 @@ async def run_pipeline(request: Request):
             site_brief=site_brief,
             zone_rules=constraint_result.get("zone_rules", []),
             zone_programmes=programme_result.get("zone_programmes", []),
+            api_key=api_key,
+            model_name=resolved_model,
         )
         volume_geometry = volume_result.get("volumes", [])
         extracted_geometry.extend(volume_geometry)

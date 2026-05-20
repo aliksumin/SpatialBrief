@@ -54,6 +54,156 @@ MAX_FOOTPRINT_BY_USE: Dict[str, float] = {
 DEFAULT_MAX_FOOTPRINT = 1500.0  # general fallback
 
 
+class CADLayoutGenerator:
+    """Deterministic, geometric layout generator for building footprints inside buildable envelopes.
+
+    Uses rotation-based alignment to align proposed rectangular footprints with the major orientation
+    axis of the envelope/setback polygon.
+    """
+    def __init__(self, envelope_poly: Any, setback_m: float = 3.0):
+        self.envelope_poly = envelope_poly
+        self.setback_m = max(0.0, setback_m)
+
+        # Calculate setback polygon
+        if self.setback_m > 0:
+            try:
+                self.setback_poly = self.envelope_poly.buffer(-self.setback_m)
+                if self.setback_poly.is_empty or not self.setback_poly.is_valid:
+                    self.setback_poly = self.envelope_poly
+            except Exception:
+                self.setback_poly = self.envelope_poly
+        else:
+            self.setback_poly = self.envelope_poly
+
+    def _get_major_angle(self, poly: Any) -> float:
+        """Find the angle of the longest edge of the polygon's exterior boundary."""
+        try:
+            coords = list(poly.exterior.coords)
+            max_len = 0.0
+            best_angle = 0.0
+            for i in range(len(coords) - 1):
+                p1 = coords[i]
+                p2 = coords[i+1]
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                length = math.hypot(dx, dy)
+                if length > max_len:
+                    max_len = length
+                    best_angle = math.atan2(dy, dx)
+            return best_angle
+        except Exception:
+            return 0.0
+
+    def generate_layout(
+        self,
+        typology: str = "row_houses",
+        count: int = 3,
+        spacing_m: float = 5.0,
+        building_width_m: float = 12.0,
+        building_length_m: float = 20.0,
+    ) -> List[Any]:
+        """Generate perfect orthogonal building footprints inside the setback boundary.
+
+        Returns:
+          A list of Shapely Polygon objects representing building footprints.
+        """
+        from shapely.affinity import rotate
+        from shapely.geometry import Polygon as ShapelyPoly
+
+        count = max(1, count)
+        spacing_m = max(0.0, spacing_m)
+        building_width_m = max(4.0, building_width_m)
+        building_length_m = max(5.0, building_length_m)
+
+        # 1. Get major orientation angle of setback polygon
+        theta = self._get_major_angle(self.setback_poly)
+
+        # 2. Rotate setback polygon by -theta around its centroid to align with X axis
+        origin = self.setback_poly.centroid
+        rotated_poly = rotate(self.setback_poly, -theta, use_radians=True, origin=origin)
+
+        # 3. Get bounds of the rotated polygon
+        minx, miny, maxx, maxy = rotated_poly.bounds
+        dx = maxx - minx
+        dy = maxy - miny
+
+        # Determine layout direction based on bounds aspect ratio
+        layout_along_x = dx >= dy
+
+        # b_len: dimension along layout axis, b_wid: dimension perpendicular to layout axis
+        if layout_along_x:
+            b_len = building_length_m
+            b_wid = building_width_m
+            axis_size = dx
+            perp_size = dy
+        else:
+            b_len = building_width_m
+            b_wid = building_length_m
+            axis_size = dy
+            perp_size = dx
+
+        # Adjust layout parameters if they don't fit inside bounds
+        total_len = count * b_len + (count - 1) * spacing_m
+        if total_len > axis_size:
+            # If count is too high, reduce count or spacing
+            if count > 1:
+                spacing_m = max(2.0, (axis_size - count * b_len) / (count - 1))
+                total_len = count * b_len + (count - 1) * spacing_m
+            if total_len > axis_size:
+                # Still too big, shrink building length to fit
+                b_len = max(5.0, (axis_size - (count - 1) * spacing_m) / count)
+                total_len = count * b_len + (count - 1) * spacing_m
+
+        if b_wid > perp_size:
+            b_wid = max(4.0, perp_size - 1.0)
+
+        # Generate building boxes in rotated coordinate system
+        bldg_polys = []
+        margin = (axis_size - total_len) / 2.0
+
+        for k in range(count):
+            # Centered coordinate along layout axis
+            c_axis = (minx if layout_along_x else miny) + margin + k * (b_len + spacing_m) + b_len / 2.0
+            # Centered coordinate along perpendicular axis
+            c_perp = ((miny + maxy) if layout_along_x else (minx + maxx)) / 2.0
+
+            if layout_along_x:
+                cx, cy = c_axis, c_perp
+                x1, y1 = cx - b_len / 2.0, cy - b_wid / 2.0
+                x2, y2 = cx + b_len / 2.0, cy + b_wid / 2.0
+            else:
+                cx, cy = c_perp, c_axis
+                x1, y1 = cx - b_wid / 2.0, cy - b_len / 2.0
+                x2, y2 = cx + b_wid / 2.0, cy - b_len / 2.0
+
+            rect_poly = ShapelyPoly([
+                (x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)
+            ])
+
+            # Ensure polygon is valid
+            if not rect_poly.is_valid:
+                continue
+
+            # Clip with the rotated setback polygon to make sure it is strictly inside
+            clipped_poly = rotated_poly.intersection(rect_poly)
+            if not clipped_poly.is_empty and clipped_poly.is_valid:
+                if clipped_poly.area > rect_poly.area * 0.3:
+                    bldg_polys.append(clipped_poly)
+                else:
+                    bldg_polys.append(rect_poly)
+            else:
+                bldg_polys.append(rect_poly)
+
+        # 4. Rotate generated shapes back by +theta to original coordinate space
+        final_polys = []
+        for bp in bldg_polys:
+            orig_bp = rotate(bp, theta, use_radians=True, origin=origin)
+            if orig_bp.is_valid and not orig_bp.is_empty:
+                final_polys.append(orig_bp)
+
+        return final_polys
+
+
 def _compute_centroid(points: List[List[float]]) -> List[float]:
     """Compute 2D centroid of a polygon (using x, z for 3D points)."""
     if not points:
@@ -136,9 +286,179 @@ def _create_floor_volume(
     }
 
 
+def _propose_building_footprints_with_ai(
+    envelope_poly: Any,
+    target_gfa: Optional[float],
+    max_height: Optional[float],
+    typology: Optional[str],
+    api_key: Optional[str],
+    model_name: Optional[str],
+    is_3d: bool,
+) -> Optional[List[Dict[str, Any]]]:
+    """Use Gemini to propose realistic, orthogonal building footprints inside the buildable envelope."""
+    if not api_key:
+        return None
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+        model = model_name or "gemini-2.5-flash"
+
+        envelope_area = envelope_poly.area
+
+        # Calculate required footprint area based on target_gfa and max_height (number of floors)
+        estimated_floors = 3
+        if max_height and max_height > 0:
+            estimated_floors = max(1, int(max_height / 3.0))
+
+        if target_gfa and target_gfa > 0:
+            required_footprint = target_gfa / estimated_floors
+        else:
+            # Fallback coverage ratio of 35% of envelope area
+            required_footprint = envelope_area * 0.35
+
+        # Clamp required footprint to a reasonable ratio of envelope area (max 85%)
+        required_footprint = min(required_footprint, envelope_area * 0.85)
+
+        prompt = f"""
+You are an expert urban planner and CAD layout generator.
+Given a 2D buildable envelope polygon, you must propose layout parameters to generate realistic building footprints that fit strictly INSIDE it.
+
+Buildable Envelope:
+- Area: {envelope_area:.1f} m²
+
+Constraints:
+- Target GFA: {f"{target_gfa:.0f} m²" if target_gfa else "Not specified"}
+- Max Height: {f"{max_height:.0f}m" if max_height else "Not specified"}
+- Recommended Typology: {typology or "residential_block"}
+- Target Total Footprint Area: {required_footprint:.1f} m² (estimated assuming {estimated_floors} floors)
+
+Based on these parameters, decide the optimal layout configuration:
+- "layout_typology": one of "row_houses", "apartment_blocks", "tower_plinth", or "campus".
+- "count": number of building blocks to generate (typically 1 to 4).
+- "setback_m": distance in meters from the envelope edge (typically 3.0 to 5.0m).
+- "spacing_m": spacing between building blocks (typically 5.0 to 12.0m).
+- "building_width_m": width of each block (typically 10.0 to 15.0m).
+- "building_length_m": length of each block (typically 15.0 to 45.0m).
+
+CRITICAL RULE:
+The sum of the footprints of your proposed blocks (i.e. `count * building_width_m * building_length_m`) MUST approximate the Target Total Footprint Area of {required_footprint:.1f} m² as closely as possible, while fitting inside the envelope with the specified setbacks.
+- If the Target Total Footprint Area is large, increase `count` (up to 4) and use larger block dimensions (e.g. width of 12-16m, length of 25-45m) to ensure buildings are realistic, proportional, and cover the requested area. Do NOT generate tiny building footprints in the middle of large envelopes.
+
+Return ONLY a valid JSON object matching this schema:
+{{
+  "layout_typology": "row_houses",
+  "count": 3,
+  "setback_m": 3.0,
+  "spacing_m": 5.0,
+  "building_width_m": 12.0,
+  "building_length_m": 20.0
+}}
+"""
+
+        log.info("[Volumes/AI-Proposer] Querying %s for building proposals...", model)
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+            )
+        )
+
+        text = response.text.strip()
+        # Strip markdown code fences if model returned them anyway
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        config = json.loads(text)
+        if not isinstance(config, dict) or not config:
+            return None
+
+        # Instantiate CADLayoutGenerator
+        setback = float(config.get("setback_m", 3.0))
+        generator = CADLayoutGenerator(envelope_poly, setback_m=setback)
+
+        layout_typology = config.get("layout_typology", "row_houses")
+        count = int(config.get("count", 3))
+        spacing = float(config.get("spacing_m", 5.0))
+        width = float(config.get("building_width_m", 12.0))
+        length = float(config.get("building_length_m", 20.0))
+
+        # Enforce realistic thickness/width limits for residential/commercial uses
+        is_residential = not typology or "residential" in typology.lower() or "home" in typology.lower()
+        if is_residential:
+            # Cap width to 14.0m for residential
+            width = min(width, 14.0)
+        else:
+            # Cap width to 18.0m for commercial/office
+            width = min(width, 18.0)
+
+        log.info("[Volumes/AI-Proposer] CAD Generator parameters: typology=%s, count=%d, spacing=%.1fm, width=%.1fm (capped from %.1fm), length=%.1fm",
+                 layout_typology, count, spacing, width, float(config.get("building_width_m", 12.0)), length)
+
+        layout_polys = generator.generate_layout(
+            typology=layout_typology,
+            count=count,
+            spacing_m=spacing,
+            building_width_m=width,
+            building_length_m=length,
+        )
+
+        derived = []
+        for i, bldg_poly in enumerate(layout_polys):
+            pts_cleaned = list(bldg_poly.exterior.coords)
+
+            if is_3d:
+                out_pts = [[round(c[0], 4), 0, round(c[1], 4)] for c in pts_cleaned]
+            else:
+                out_pts = [[round(c[0], 4), round(c[1], 4)] for c in pts_cleaned]
+
+            centroid = bldg_poly.centroid
+            ct = [round(centroid.x, 4), 0, round(centroid.y, 4)] if is_3d else [round(centroid.x, 4), round(centroid.y, 4)]
+
+            derived.append({
+                "id": f"ai_proposed_bldg_{i+1}",
+                "type": "Polygon",
+                "zone_type": "sub_zone",
+                "zone_label": f"Proposed Building {i+1}",
+                "points": out_pts,
+                "closed": True,
+                "color_hint": "#8b5cf6",
+                "confidence": 0.85,
+                "classification_method": f"ai_proposed_cad (Gemini:{model})",
+                "filled": False,
+                "area_pdf_units": round(bldg_poly.area, 1),
+                "area_m2": round(bldg_poly.area, 1),
+                "centroid": ct,
+                "stroke_width": 1.0,
+                "marker_labels": [],
+                "_derived": True,
+            })
+
+        if derived:
+            log.info("[Volumes/AI-Proposer] Successfully accepted %d AI-proposed building footprints", len(derived))
+            return derived
+
+    except Exception as e:
+        log.error("[Volumes/AI-Proposer] Failed to generate AI footprints: %s", e)
+        log.error(traceback.format_exc())
+
+    return None
+
+
 def _derive_footprints_from_envelope(
     zones: List[Dict[str, Any]],
     constraints: List[Dict[str, Any]],
+    api_key: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """When no building outlines exist, derive footprints from the buildable
     envelope + constraints (target GFA, density, height, setbacks).
@@ -231,6 +551,28 @@ def _derive_footprints_from_envelope(
     else:
         floors = 4
 
+    # Try using AI footprint proposal if API key is available
+    if api_key:
+        typology = None
+        for z in zones:
+            if z.get("typology"):
+                typology = z["typology"]
+                break
+        ai_derived = _propose_building_footprints_with_ai(
+            envelope_poly=poly,
+            target_gfa=target_gfa,
+            max_height=max_height,
+            typology=typology,
+            api_key=api_key,
+            model_name=model_name,
+            is_3d=is_3d,
+        )
+        if ai_derived:
+            # Set target floors/gfa on first derived building for floor count calculations
+            ai_derived[0]["_target_floors"] = floors
+            ai_derived[0]["_target_gfa"] = target_gfa
+            return ai_derived
+
     # Compute required footprint area
     # Priority: target_gfa > fsi > density_ratio > use full envelope
     footprint_area = None
@@ -256,7 +598,68 @@ def _derive_footprints_from_envelope(
     # Build footprint polygon(s)
     derived = []
 
-    if footprint_area and footprint_area < envelope_area * 0.95:
+    # Try rule-based CADLayoutGenerator fallback first before scaling down
+    layout_polys = []
+    if footprint_area and footprint_area < envelope_area:
+        try:
+            # Use 12m width for residential, 16m for commercial
+            is_res = not typology or "res" in typology.lower() or "home" in typology.lower()
+            b_width = 12.0 if is_res else 16.0
+            b_length = 35.0
+            b_area = b_width * b_length
+
+            # Estimate count
+            est_count = max(1, round(footprint_area / b_area))
+            est_count = min(4, est_count) # cap at 4 blocks
+
+            # Recalculate length to match required footprint area
+            b_length = max(15.0, min(50.0, footprint_area / (est_count * b_width)))
+
+            setback_val = setback_dist or 3.0
+            generator = CADLayoutGenerator(poly, setback_m=setback_val)
+            layout_polys = generator.generate_layout(
+                typology="apartment_blocks",
+                count=est_count,
+                spacing_m=6.0,
+                building_width_m=b_width,
+                building_length_m=b_length
+            )
+            if layout_polys:
+                log.info("[Volumes/Derive] Generated %d rule-based fallback footprints using CADLayoutGenerator", len(layout_polys))
+                for i, bldg_poly in enumerate(layout_polys):
+                    pts_cleaned = list(bldg_poly.exterior.coords)
+                    if is_3d:
+                        out_pts = [[round(c[0], 4), 0, round(c[1], 4)] for c in pts_cleaned]
+                    else:
+                        out_pts = [[round(c[0], 4), round(c[1], 4)] for c in pts_cleaned]
+                    centroid = bldg_poly.centroid
+                    ct = [round(centroid.x, 4), 0, round(centroid.y, 4)] if is_3d else [round(centroid.x, 4), round(centroid.y, 4)]
+
+                    derived.append({
+                        "id": f"derived_bldg_{i+1}",
+                        "type": "Polygon",
+                        "zone_type": "sub_zone",
+                        "zone_label": f"Derived Building {i+1}",
+                        "points": out_pts,
+                        "closed": True,
+                        "color_hint": "#8b5cf6",
+                        "confidence": 0.55,
+                        "classification_method": "derived_from_envelope (CAD_rule_fallback)",
+                        "filled": False,
+                        "area_pdf_units": round(bldg_poly.area, 1),
+                        "area_m2": round(bldg_poly.area, 1),
+                        "centroid": ct,
+                        "stroke_width": 1.0,
+                        "marker_labels": [],
+                        "_derived": True,
+                        "_target_floors": floors,
+                        "_target_gfa": target_gfa,
+                    })
+        except Exception as e:
+            log.warning("[Volumes/Derive] Rule-based fallback layout generation failed: %s", e)
+
+    # If rule-based fallback didn't produce anything, use the scaling method as a last resort
+    if not derived and footprint_area and footprint_area < envelope_area * 0.95:
         # Scale the envelope down to match required footprint area
         scale_factor = math.sqrt(footprint_area / max(envelope_area, 1))
         cx, cy = poly.centroid.x, poly.centroid.y
@@ -273,7 +676,7 @@ def _derive_footprints_from_envelope(
             ct = [round(centroid.x, 4), 0, round(centroid.y, 4)] if is_3d else [round(centroid.x, 4), round(centroid.y, 4)]
 
             derived.append({
-                "id": f"derived_bldg_1",
+                "id": "derived_bldg_1",
                 "type": "Polygon",
                 "zone_type": "sub_zone",
                 "zone_label": "Derived Building 1",
@@ -294,6 +697,7 @@ def _derive_footprints_from_envelope(
             })
             log.info("[Volumes/Derive] Created derived footprint: %.0f m² (method=%s)",
                      scaled.area, method)
+
     else:
         # Apply a default setback inset (never use the full zone as-is)
         default_inset = max(poly.length * 0.03, 2.0)  # ~3% of perimeter or 2m minimum
@@ -374,6 +778,8 @@ def generate_volumes(
     site_brief: Optional[Dict[str, Any]] = None,
     zone_rules: Optional[List[Dict[str, Any]]] = None,
     zone_programmes: Optional[List[Dict[str, Any]]] = None,
+    api_key: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate 3D floor-by-floor volumes from building footprints + programme.
@@ -436,6 +842,44 @@ def generate_volumes(
             z["_shapely"] = sp
             buildable_envelopes.append(z)
 
+    # ── Ensure every buildable envelope has a zone programme with target GFA & Max Height ──
+    for env in buildable_envelopes:
+        env_id = env.get("id", "")
+        if not env_id:
+            continue
+        zp = zp_by_zone_id.get(env_id)
+
+        # If no zp exists, create a default one
+        if not zp:
+            zp = {
+                "zone_id": env_id,
+                "use": env.get("typology", "residential"),
+            }
+            zp_by_zone_id[env_id] = zp
+
+        # Ensure max_height_m is set
+        if not zp.get("max_height_m"):
+            zp["max_height_m"] = max_height_global or 15.0
+
+        # Ensure target_gfa_m2 is set
+        if not zp.get("target_gfa_m2") or zp["target_gfa_m2"] <= 0:
+            env_sp = env.get("_shapely")
+            if env_sp:
+                # Suggest target GFA based on FSI matching typology
+                typology = env.get("typology") or zp.get("use") or (site_brief.get("dominant_typology") if site_brief else "residential")
+                fsi = 1.5
+                if typology:
+                    typology = typology.lower()
+                    if "office" in typology or "commercial" in typology:
+                        fsi = 2.0
+                    elif "retail" in typology:
+                        fsi = 1.0
+                    elif "industrial" in typology:
+                        fsi = 0.6
+                zp["target_gfa_m2"] = round(env_sp.area * fsi, 1)
+                log.info("[Volumes] Zone '%s' has no target GFA. Suggested fallback target GFA of %.1f m² (FSI=%.1f, typology=%s)",
+                         env.get("zone_label", env_id), zp["target_gfa_m2"], fsi, typology)
+
     # ── Plot area for sizing reference ──
     plot_area = 0
     for z in zones:
@@ -458,6 +902,20 @@ def generate_volumes(
             continue
         sp = make_poly(z.get("points", []))
         if sp:
+            try:
+                minr = sp.minimum_rotated_rectangle
+                coords = list(minr.exterior.coords)
+                if len(coords) >= 3:
+                    w = math.dist(coords[0], coords[1])
+                    h = math.dist(coords[1], coords[2])
+                    bldg_width = min(w, h)
+                    if bldg_width < 4.0:
+                        log.info("[Volumes] Skipping narrow sub_zone '%s' (width = %.2fm < 4m)",
+                                 z.get("zone_label", z["id"]), bldg_width)
+                        continue
+            except Exception as e:
+                log.warning("[Volumes] Error checking width of sub_zone: %s", e)
+
             z["_shapely"] = sp
             buildings[z["id"]] = z
 
@@ -493,7 +951,7 @@ def generate_volumes(
                 zone_constraints.append({"category": "gfa", "value": zone_gfa, "unit": "m²", "name": "Zone GFA"})
             if zone_height:
                 zone_constraints.append({"category": "height", "value": zone_height, "unit": "m", "name": "Zone Height"})
-            dfs = _derive_footprints_from_envelope([env], zone_constraints)
+            dfs = _derive_footprints_from_envelope([env], zone_constraints, api_key=api_key, model_name=model_name)
             for df in dfs:
                 sp = make_poly(df.get("points", []))
                 if sp:
@@ -524,7 +982,7 @@ def generate_volumes(
             if zone_height:
                 zone_constraints.append({"category": "height", "value": zone_height, "unit": "m", "name": "Zone Height"})
             log.info("[Volumes] Empty zone '%s' — deriving footprint", env.get("zone_label", env.get("id")))
-            dfs = _derive_footprints_from_envelope([env], zone_constraints)
+            dfs = _derive_footprints_from_envelope([env], zone_constraints, api_key=api_key, model_name=model_name)
             for df in dfs:
                 df["id"] = f"derived_{env['id']}"
                 df["zone_label"] = f"Derived ({env.get('zone_label', 'Building')})"
@@ -719,16 +1177,23 @@ def generate_volumes(
                 log.info("[Volumes] Capping footprint for '%s': %.0f → %.0fm² (use=%s)",
                          bldg.get("zone_label", bid), footprint_area, effective_fp, zp_use)
 
-            # GFA-driven: floors = target_gfa / effective_footprint
+            # GFA-driven: floors based on proportional GFA split
             if zone_target_gfa and zone_target_gfa > 0 and effective_fp > 0:
-                # Count buildings in this zone to split GFA
-                bldgs_in_zone = sum(1 for b2id in buildings
-                                    if bldg_parent_zone.get(b2id, {}).get("id") == parent_id)
-                bldgs_in_zone = max(bldgs_in_zone, 1)
-                gfa_per_building = zone_target_gfa / bldgs_in_zone
-                floors = max(1, math.ceil(gfa_per_building / effective_fp))
-                log.info("[Volumes] GFA-driven: '%s' → %.0fm² GFA / %.0fm² eff.fp / %d bldgs = %d floors",
-                         bldg.get("zone_label", bid), zone_target_gfa, effective_fp, bldgs_in_zone, floors)
+                # Sum the effective footprints of all buildings in this zone
+                total_eff_fp_in_zone = 0.0
+                for b2id in buildings:
+                    if bldg_parent_zone.get(b2id, {}).get("id") == parent_id:
+                        b2_sp = buildings[b2id].get("_shapely")
+                        if b2_sp:
+                            total_eff_fp_in_zone += min(b2_sp.area, max_fp)
+                
+                total_eff_fp_in_zone = max(total_eff_fp_in_zone, 0.01)
+                
+                # Proportional GFA allocation
+                gfa_for_this_building = zone_target_gfa * (effective_fp / total_eff_fp_in_zone)
+                floors = max(1, math.ceil(gfa_for_this_building / effective_fp))
+                log.info("[Volumes] GFA-driven: '%s' → %.0fm² zone GFA (proportional: %.0fm² for this bldg) / %.0fm² eff.fp = %d floors",
+                         bldg.get("zone_label", bid), zone_target_gfa, gfa_for_this_building, effective_fp, floors)
             elif effective_max_height:
                 available = effective_max_height - base_y
                 floors = max(1, int(available / floor_height))

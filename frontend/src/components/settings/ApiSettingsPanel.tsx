@@ -13,7 +13,7 @@ export const ApiSettingsPanel: React.FC = () => {
   }
 
   const [provider, setProvider] = useState(localStorage.getItem('apiProvider') || 'google');
-  const [googleModel, setGoogleModel] = useState(localStorage.getItem('googleModel') || 'gemini-2.5-flash');
+  const [googleModel, setGoogleModel] = useState(localStorage.getItem('googleModel') || 'gemini-3.5-flash');
   const [openaiModel, setOpenaiModel] = useState(localStorage.getItem('openaiModel') || 'gpt-5.5');
   
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('geminiKey') || '');
@@ -76,6 +76,7 @@ export const ApiSettingsPanel: React.FC = () => {
   };
 
   const googleModels = [
+    { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
     { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
     { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },

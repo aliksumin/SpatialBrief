@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 # Updated periodically. Covers common Gemini models.
 # Format: { model_prefix: (input_per_1M, output_per_1M) }
 _PRICING: Dict[str, tuple] = {
+    "gemini-3.5-flash":    (1.50,  9.00),
     "gemini-2.5-flash":    (0.15,  0.60),
     "gemini-2.5-pro":      (1.25, 10.00),
     "gemini-2.0-flash":    (0.10,  0.40),

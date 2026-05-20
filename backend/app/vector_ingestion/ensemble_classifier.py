@@ -29,6 +29,68 @@ VALID_ZONE_TYPES = {
     "no_build_zone", "restriction_line", "artifact",
 }
 
+
+def _classify_locally_if_simple(poly: Dict[str, Any], page_area: float) -> Optional[Dict[str, Any]]:
+    """Determine if a polygon is an obvious artifact or simple shape that can be classified locally.
+
+    Returns:
+      A dict containing {"zone_type": ..., "confidence": ..., "reason": ...} if locally classified,
+      else None.
+    """
+    sp = poly.get("shapely_poly")
+    if not sp or not sp.is_valid or sp.is_empty:
+        return {
+            "zone_type": "artifact",
+            "confidence": 1.0,
+            "reason": "local_filter: invalid/empty shape"
+        }
+
+    area = poly.get("area", 0)
+    area_pct = area / page_area if page_area > 0 else 0
+
+    # Check shape metrics
+    aspect_ratio = 1.0
+    compactness = 1.0
+    try:
+        hull = sp.convex_hull
+        minr = sp.minimum_rotated_rectangle
+        coords = list(minr.exterior.coords)
+        if len(coords) >= 3:
+            w = math.dist(coords[0], coords[1])
+            h = math.dist(coords[1], coords[2])
+            aspect_ratio = max(w, h) / max(min(w, h), 0.001)
+            compactness = sp.area / max(hull.area, 0.001)
+    except Exception:
+        pass
+
+    # Extremely narrow lines/walkways/gridlines/page margins
+    if aspect_ratio > 10.0:
+        return {
+            "zone_type": "artifact",
+            "confidence": 0.95,
+            "reason": f"local_filter: high aspect ratio ({aspect_ratio:.1f})"
+        }
+
+    # Extremely small dots/symbols
+    if area_pct < 0.0001:
+        return {
+            "zone_type": "artifact",
+            "confidence": 0.90,
+            "reason": f"local_filter: micro area ({area_pct*100:.4f}% of page)"
+        }
+
+    # Text labels / Legend borders (e.g. tiny rectangular boxes of text)
+    if area_pct < 0.0005 and 0.90 < compactness < 1.05 and 1.0 <= aspect_ratio < 2.5:
+        if poly.get("text_label") or poly.get("marker_labels"):
+            return {
+                "zone_type": "artifact",
+                "confidence": 0.85,
+                "reason": "local_filter: text label box"
+            }
+
+    return None
+
+
 # ── Shared helpers ──────────────────────────────────────────────
 
 def _format_site_brief_for_prompt(site_brief: Optional[Dict]) -> str:
@@ -128,8 +190,9 @@ def _build_polygon_manifest(polygons, page_area):
         area = poly.get("area", 0)
         area_pct = round(area / page_area * 100, 2) if page_area > 0 else 0
         cx, cy = poly.get("centroid", (0, 0))
+        original_idx = poly.get("_original_index", i)
         entry = {
-            "id": i,
+            "id": original_idx,
             "area_pct": area_pct,
             "filled": poly.get("fill") is not None,
             "centroid": [round(cx, 1), round(cy, 1)],
@@ -284,8 +347,9 @@ def _build_context_data(polygons, page_area, page):
 
     for i, poly in enumerate(polygons):
         cx, cy = poly.get("centroid", (0, 0))
+        original_idx = poly.get("_original_index", i)
         entry = {
-            "id": i,
+            "id": original_idx,
             "area_pct": round(poly.get("area", 0) / page_area * 100, 2) if page_area > 0 else 0,
             "extraction": poly.get("_extraction_strategy", "direct"),
             "guess": poly.get("_classification_guess", "unknown"),
@@ -375,6 +439,39 @@ def _run_contextual_agent(client, model_name, context_data, site_brief_text="", 
     prompt = _build_contextual_prompt(context_data, site_brief_text)
     log.info("[Ensemble/Contextual] Calling %s with %d polygons...", model_name, len(context_data))
     return _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="ensemble_contextual")
+
+
+def _run_site_brief_audit_agent(client, model_name, site_brief: Dict, contradiction_summary: str, cost_tracker=None) -> Dict:
+    """Re-analyze the site brief expectations in light of physical map evidence."""
+    prompt = f"""You are an urban planning auditor. We have a conflict between the text-based Site Brief and the actual zoning map layout.
+
+── SITE BRIEF EXPECTATIONS ──
+• Expected building count: {site_brief.get("expected_building_count", 0)}
+• Expected buildable zones: {site_brief.get("expected_buildable_zones", 0)}
+• Typology: {site_brief.get("dominant_typology", "unknown")}
+
+── PHYSICAL EVIDENCE FOUND ON MAP ──
+{contradiction_summary}
+
+── YOUR TASK ──
+Resolve the conflict. Sometimes the text-based analysis missed mention of buildings (e.g. they were specified in a different table or subsection), or expected buildings were implied but not counted.
+Decide if the site brief expectations should be updated to match the map evidence.
+Return a valid JSON object matching this structure:
+{{
+  "update_expected_building_count": true,
+  "new_expected_building_count": 4,
+  "update_expected_buildable_zones": true,
+  "new_expected_buildable_zones": 1,
+  "audit_reason": "Explanation of why the site brief was updated or kept."
+}}
+"""
+    log.info("[Ensemble/Audit] Triggering site brief audit loop due to map contradictions...")
+    res_list = _call_gemini(client, model_name, [prompt], cost_tracker=cost_tracker, stage="site_brief_audit")
+    if res_list and isinstance(res_list, list) and len(res_list) > 0:
+        return res_list[0]
+    elif isinstance(res_list, dict):
+        return res_list
+    return {}
 
 
 # ── Judge Agent ─────────────────────────────────────────────────
@@ -619,7 +716,33 @@ def classify_polygons_ensemble(
             _guess_category,
         )
 
+        # Initialize original indices
+        for idx, poly in enumerate(polygons):
+            poly["_original_index"] = idx
+
+        # Run local pre-classification pre-filtering
+        pre_classified_count = 0
         for poly in polygons:
+            local_res = _classify_locally_if_simple(poly, page_area)
+            if local_res:
+                poly["_ai_zone_type"] = local_res["zone_type"]
+                poly["_is_artifact"] = (local_res["zone_type"] == "artifact")
+                poly["_ai_confidence"] = local_res["confidence"]
+                poly["_ai_reason"] = local_res["reason"]
+                pre_classified_count += 1
+
+        log.info("[Ensemble] Local pre-classifier: filtered out %d of %d polygons",
+                 pre_classified_count, len(polygons))
+
+        polygons_to_classify = [p for p in polygons if "_ai_zone_type" not in p]
+
+        # Early return if everything classified locally
+        if not polygons_to_classify:
+            log.info("[Ensemble] All polygons classified locally. Skipping LLM agent calls.")
+            _cleanup_temp_keys(polygons)
+            return polygons
+
+        for poly in polygons_to_classify:
             poly["_classification_guess"] = _guess_category(poly, page_area)
             sp = poly.get("shapely_poly")
             if sp:
@@ -643,8 +766,8 @@ def classify_polygons_ensemble(
         crop_imgs = _render_building_crops(page, polygons, page_area, dpi=200, max_crops=1)
 
         # Build shared metadata
-        manifest = _build_polygon_manifest(polygons, page_area)
-        context_data = _build_context_data(polygons, page_area, page)
+        manifest = _build_polygon_manifest(polygons_to_classify, page_area)
+        context_data = _build_context_data(polygons_to_classify, page_area, page)
 
         # Format site brief for prompts
         brief_text = _format_site_brief_for_prompt(site_brief)
@@ -663,7 +786,7 @@ def classify_polygons_ensemble(
             futures = {
                 executor.submit(
                     _run_visual_agent, client, m_visual,
-                    polygons, clean_img, annotated_img, crop_imgs,
+                    polygons_to_classify, clean_img, annotated_img, crop_imgs,
                     brief_text, cost_tracker,
                 ): "Visual",
                 executor.submit(
@@ -710,11 +833,71 @@ def classify_polygons_ensemble(
             return polygons
 
         # ── Step 4: Run judge agent ──
+        polygon_ids = [p["_original_index"] for p in polygons_to_classify]
+
+        # Audit Site Brief if physical evidence contradicts text-based rules
+        if site_brief is not None:
+            has_contradiction = False
+            contradiction_reasons = []
+
+            # Count high-confidence buildings from specialists
+            high_conf_buildings = set()
+            for res_list in [visual_res, geometric_res, contextual_res]:
+                for cls in res_list:
+                    if cls.get("zone_type") == "sub_zone" and cls.get("confidence", 0) >= 0.90:
+                        high_conf_buildings.add(cls.get("id"))
+
+            actual_buildings_count = len(high_conf_buildings)
+            expected_buildings = site_brief.get("expected_building_count", 0)
+            if actual_buildings_count > 0 and expected_buildings == 0:
+                has_contradiction = True
+                contradiction_reasons.append(
+                    f"We found {actual_buildings_count} high-confidence building outlines on the map, but the Site Brief expected 0."
+                )
+
+            # Count high-confidence buildable envelopes
+            high_conf_envelopes = set()
+            for res_list in [visual_res, geometric_res, contextual_res]:
+                for cls in res_list:
+                    if cls.get("zone_type") == "buildable_envelope" and cls.get("confidence", 0) >= 0.90:
+                        high_conf_envelopes.add(cls.get("id"))
+
+            actual_envelopes_count = len(high_conf_envelopes)
+            expected_envelopes = site_brief.get("expected_buildable_zones", 0)
+            if actual_envelopes_count > 0 and expected_envelopes == 0:
+                has_contradiction = True
+                contradiction_reasons.append(
+                    f"We found {actual_envelopes_count} high-confidence buildable envelopes on the map, but the Site Brief expected 0."
+                )
+
+            if has_contradiction:
+                summary_str = "\n".join(contradiction_reasons)
+                try:
+                    audit_res = _run_site_brief_audit_agent(
+                        client, m_judge, site_brief, summary_str, cost_tracker
+                    )
+                    if audit_res:
+                        if audit_res.get("update_expected_building_count"):
+                            site_brief["expected_building_count"] = audit_res.get("new_expected_building_count", expected_buildings)
+                            log.info("[Ensemble/Audit] Site brief expected_building_count updated from %d to %d",
+                                     expected_buildings, site_brief["expected_building_count"])
+                        if audit_res.get("update_expected_buildable_zones"):
+                            site_brief["expected_buildable_zones"] = audit_res.get("new_expected_buildable_zones", expected_envelopes)
+                            log.info("[Ensemble/Audit] Site brief expected_buildable_zones updated from %d to %d",
+                                     expected_envelopes, site_brief["expected_buildable_zones"])
+                        if audit_res.get("audit_reason"):
+                            site_brief["audit_note"] = audit_res["audit_reason"]
+
+                        # Re-format site brief for the Judge prompt!
+                        brief_text = _format_site_brief_for_prompt(site_brief)
+                except Exception as audit_err:
+                    log.error("[Ensemble/Audit] Site brief audit failed: %s", audit_err)
+
         if successful >= 2:
             log.info("[Ensemble] Running judge agent to merge results...")
             try:
                 judge_results = _run_judge_agent(
-                    client, m_judge, len(polygons),
+                    client, m_judge, len(polygons_to_classify),
                     visual_res, geometric_res, contextual_res, manifest,
                     brief_text, cost_tracker,
                 )
@@ -722,7 +905,7 @@ def classify_polygons_ensemble(
             except Exception as e:
                 log.error("[Ensemble/Judge] Failed: %s — using majority vote fallback", e)
                 judge_results = _majority_vote_fallback(
-                    visual_res, geometric_res, contextual_res, len(polygons)
+                    visual_res, geometric_res, contextual_res, polygon_ids
                 )
         else:
             # Only 1 agent succeeded — use its results directly
@@ -735,7 +918,7 @@ def classify_polygons_ensemble(
             log.info("[Ensemble] ── Refinement iteration %d/3 ──", iteration)
             try:
                 refinement_results = _run_refinement_iteration(
-                    client, m_judge, polygons, current_results, manifest,
+                    client, m_judge, polygons_to_classify, current_results, manifest,
                     clean_img, annotated_img, iteration,
                     brief_text, cost_tracker,
                 )
@@ -1053,11 +1236,16 @@ def _resolve_conflicts_rule_based(polygons, conflicts):
 
 # ── Post-processing helpers ─────────────────────────────────────
 
-def _majority_vote_fallback(visual, geometric, contextual, n_polygons):
+def _majority_vote_fallback(visual, geometric, contextual, polygon_ids):
     """Fallback: majority vote when judge agent fails."""
     from collections import Counter
     results = []
-    for i in range(n_polygons):
+    if isinstance(polygon_ids, int):
+        ids = list(range(polygon_ids))
+    else:
+        ids = list(polygon_ids)
+
+    for i in ids:
         votes = []
         for agent_res in [visual, geometric, contextual]:
             for cls in agent_res:
@@ -1167,6 +1355,8 @@ def _enforce_hard_rules(polygons, page_area):
     # Rule: buildable envelopes should contain at least one building
     # If a compact polygon sits inside a buildable_envelope but wasn't
     # classified, force it to sub_zone
+    from app.vector_ingestion.ai_vision_classifier import _is_realistic_building_shape
+
     envelopes = [p for p in polygons if p.get("_ai_zone_type") == "buildable_envelope"]
     for env in envelopes:
         env_sp = env.get("shapely_poly")
@@ -1188,6 +1378,9 @@ def _enforce_hard_rules(polygons, page_area):
                     continue
                 inner_sp = p.get("shapely_poly")
                 if not inner_sp or not env_sp.contains(inner_sp.centroid):
+                    continue
+                # Check if it meets realistic building shape metrics
+                if not _is_realistic_building_shape(p):
                     continue
                 # Check if it's compact enough to be a building
                 area_ratio = inner_sp.area / max(env_sp.area, 1)
@@ -1231,9 +1424,20 @@ def _enforce_hard_rules(polygons, page_area):
                     f" [plinth: contains {inner_count} buildings]"
                 )
 
+    # Post-classification cleanup of sub_zones: Demote narrow/spiky sub_zones to artifact
+    for poly in polygons:
+        if poly.get("_ai_zone_type") == "sub_zone":
+            if not _is_realistic_building_shape(poly):
+                log.info("[Ensemble] Post-class cleanup: demoting narrow/spiky sub_zone %s to artifact",
+                         poly.get("id", "?"))
+                poly["_ai_zone_type"] = "artifact"
+                poly["_is_artifact"] = True
+                poly["_ai_reason"] = "post_class_cleanup: failed building shape metrics"
+
 
 def _cleanup_temp_keys(polygons):
     """Remove temporary keys used during classification."""
     for poly in polygons:
         poly.pop("_classification_guess", None)
         poly.pop("_shape_metrics_for_ai", None)
+        poly.pop("_original_index", None)

@@ -132,7 +132,7 @@ SpatialBrief processes documents through a 9-node pipeline:
 | 6 | **Extract Vector Geometry** | Multi-agent ensemble extraction of zones, buildings and boundaries (uses constraints as context) |
 | 7 | **Generate Volumes** | Floor-by-floor 3D massing with plinths and underground parking |
 | 8 | **Validation Report** | Summary and cross-validation of all pipeline outputs |
-| 9 | **Export Package** | Rhino .3dm export with sublayer hierarchy and User Attributes |
+| 9 | **Export Package** | Rhino .3dm export with sublayer hierarchy and Rhino User Attributes |
 
 ### Multi-Agent Pipeline & Data Flow
 
@@ -172,28 +172,32 @@ flowchart TB
     subgraph NODE6["⑥ Extract Vector Geometry"]
         direction TB
         PDF_EXT["PDF Vector Extractor\n(path reconstruction → polygons)"]
+        LOCAL_PRE["Local Pre-Classifier\n(filters simple lines/text)"]
 
         subgraph ENSEMBLE["Multi-Agent Ensemble"]
             direction LR
-            VIS["🔍 Visual Agent\n(Gemini Vision)"]
+            VIS["🔍 Visual Agent\n(Gemini Vision + Single-Image Tags)"]
             GEO["📐 Geometric Agent\n(shape metrics)"]
             CTX["📝 Contextual Agent\n(labels + hierarchy)"]
         end
 
+        AUDIT["Audit Agent\n(resolves brief discrepancies)"]
         JUDGE["⚖️ Judge Agent\n(merge + resolve conflicts\n+ enforce site brief rules)"]
 
-        PDF_EXT --> ENSEMBLE
-        ENSEMBLE --> JUDGE
+        PDF_EXT --> LOCAL_PRE
+        LOCAL_PRE --> ENSEMBLE
+        ENSEMBLE --> AUDIT
+        AUDIT --> JUDGE
     end
 
     subgraph NODE7["⑦ Generate Volumes"]
         direction TB
         ZONE_PROG["Zone Programme Builder\n(typology + parking per zone)"]
-        DERIVE["Footprint Derivation\n(for empty zones)"]
-        VOL_GEN["Volume Generator\n(GFA-driven floors,\noverlap check,\nplinth + tower + parking)"]
+        CAD_FALLBACK["CAD Rule Fallback\n(generates clean 12m/16m blocks)"]
+        VOL_GEN["Volume Generator\n(CADLayoutGenerator AI/rules,\noverlap check,\nplinth + tower + parking)"]
         ANNOT["Zone Annotation Tags\n(numbered labels)"]
         ZONE_PROG --> VOL_GEN
-        DERIVE --> VOL_GEN
+        CAD_FALLBACK --> VOL_GEN
         VOL_GEN --> ANNOT
     end
 
@@ -217,7 +221,9 @@ flowchart TB
 
     %% Data flow connections (cross-node)
     BRIEF -. "site_brief\n(zone rules, typologies,\nexpected counts)" .-> NODE5
+    BRIEF -. "site_brief" .-> LOCAL_PRE
     BRIEF -. "site_brief" .-> JUDGE
+    BRIEF -. "site_brief" .-> AUDIT
     BRIEF -. "site_brief" .-> VOL_GEN
     UNITS -. "units_info\n(scale, origin)" .-> PDF_EXT
     ZONE_MAP -. "constraints[]\n(setback, height, GFA)" .-> VOL_GEN
@@ -235,8 +241,8 @@ flowchart TB
     classDef agentNode fill:#312e81,stroke:#a78bfa,color:#e2e8f0,stroke-width:1px
 
     class PDF,DWG inputNode
-    class DOC_AI,AI_PROG,AI_CST,VIS,CTX,JUDGE aiNode
-    class REGEX_PROG,REGEX_CST,BRIEF,UNITS,ZONE_MAP,PDF_EXT,GEO,ZONE_PROG,DERIVE,VOL_GEN,ANNOT,VALID processNode
+    class DOC_AI,AI_PROG,AI_CST,VIS,CTX,JUDGE,AUDIT aiNode
+    class REGEX_PROG,REGEX_CST,BRIEF,UNITS,ZONE_MAP,PDF_EXT,LOCAL_PRE,GEO,ZONE_PROG,CAD_FALLBACK,VOL_GEN,ANNOT,VALID processNode
     class RHINO outputNode
 ```
 
@@ -257,26 +263,25 @@ flowchart TB
 
 ### Multi-Agent Ensemble Extraction (Node 6)
 
-The vector geometry extraction uses a **multi-agent ensemble** architecture:
+The vector geometry extraction uses an optimized **multi-agent ensemble** architecture with local pre-filtering and audit loops:
 
-1. **Site Brief (Node 3)** — Pre-analysis of text, metadata, and regulatory context produces binding rules: expected zone count, building count, typologies, GFA targets, and special rules.
-2. **Three Specialist Agents** run concurrently via `ThreadPoolExecutor`:
-   - **Visual Agent** — Analyses rendered page images + annotated overlays with Gemini Vision
-   - **Geometric Agent** — Classifies polygons by shape metrics, area ratios, and compactness
-   - **Contextual Agent** — Uses text labels, containment hierarchy, and spatial relationships
-3. **Judge Agent** — Merges results, resolves conflicts, enforces the binding rules from the site brief, and resolves nested building/plinth collisions.
+1. **Local Pre-Classifier** — Automatically partitions extracted polygons, filtering out obvious noise, simple lines, and text boxes using geometric properties before invoking LLM agents. This reduces API cost by up to 70%.
+2. **Visual Agent (Single-Image Batch Vision)** — Analyzes a single high-resolution rendered image of the page with color-coded tags (`P1`, `P2`, `P3`...) to determine classes in one single API call, preserving index stability.
+3. **Three Specialist Agents** (Visual, Geometric, Contextual) run concurrently via `ThreadPoolExecutor` to classify complex polygons.
+4. **Audit Agent (Feedback Loop)** — Audits discrepancies. If specialists discover high-confidence buildings/envelopes but the Site Brief expects none, it triggers an audit prompt to reconcile and update the Site Brief rules.
+5. **Judge Agent** — Merges results, resolves conflicts, enforces the binding rules from the site brief, and resolves nested building/plinth collisions.
 
 ### AI Agent Modules
 
 | Module | Purpose |
 |--------|---------|
-| `ensemble_classifier` | Multi-agent concurrent classification (Visual + Geometric + Contextual + Judge) |
+| `ensemble_classifier` | Multi-agent concurrent classification (Visual + Geometric + Contextual + Judge + Audit Feedback) |
 | `site_brief_analyzer` | Pre-analysis: regex + AI extraction of GFA, zones, typologies → binding rules |
 | `pipeline_stages` | Node 3 (Extract Programme) and Node 4 (Detect Units) stage orchestration |
-| `ai_vision_classifier` | Single-pass Gemini Vision classification (used within the ensemble's Visual Agent) |
+| `ai_vision_classifier` | Single-pass Gemini Vision classification with tagged overlays (used within the Visual Agent) |
 | `constraint_extractor` | Regex + AI extraction of regulatory constraints with per-zone rule mapping and setback/height geometry |
 | `programme_extractor` | Building programme extraction (GFA, uses, floors) with AI gap-fill from constraints |
-| `volume_generator` | GFA-driven floor-by-floor 3D volume extrusion with overlap prevention and per-zone constraints |
+| `volume_generator` | GFA-driven 3D volume extrusion using CADLayoutGenerator (AI/rules) with overlap prevention and thickness limits |
 | `rhino_exporter` | .3dm export with sublayer hierarchy (`Parent::Child`) and Rhino User Attributes per object |
 
 ### Project Structure

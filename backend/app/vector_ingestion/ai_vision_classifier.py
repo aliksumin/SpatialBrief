@@ -77,12 +77,16 @@ def _draw_polygon_overlay(
 
     n = max(len(polygons), 1)
     for i, poly in enumerate(polygons):
+        if poly.get("_ai_zone_type") is not None:
+            continue
         pts_raw = poly.get("points", [])
         if len(pts_raw) < 3:
             continue
 
+        original_idx = poly.get("_original_index", i)
+
         # Distinct per-polygon colour via hue rotation
-        hue = (i * 360.0 / n) % 360
+        hue = (original_idx * 360.0 / n) % 360
         r, g, b = _hsl_to_rgb(hue, 0.90, 0.40)
         color = (r, g, b)
 
@@ -111,7 +115,7 @@ def _draw_polygon_overlay(
         # Draw ID label at centroid — larger font, high-contrast background
         cx = sum(p[0] for p in pts_raw) / len(pts_raw)
         cy = sum(p[1] for p in pts_raw) / len(pts_raw)
-        label = str(i)
+        label = str(original_idx)
         tw = 4 + len(label) * 5
         th = 12
         rect = fitz.Rect(cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2)
@@ -151,6 +155,8 @@ def _render_building_crops(
     # Find building-candidate polygons (small, compact, inside plot)
     candidates = []
     for i, poly in enumerate(polygons):
+        if poly.get("_ai_zone_type") is not None:
+            continue
         area = poly.get("area", 0)
         area_pct = area / page_area if page_area > 0 else 0
         if 0.0001 < area_pct < 0.04:
@@ -158,7 +164,8 @@ def _render_building_crops(
             if len(pts) >= 3:
                 cx = sum(p[0] for p in pts) / len(pts)
                 cy = sum(p[1] for p in pts) / len(pts)
-                candidates.append({"idx": i, "cx": cx, "cy": cy, "area": area})
+                original_idx = poly.get("_original_index", i)
+                candidates.append({"idx": original_idx, "cx": cx, "cy": cy, "area": area})
 
     if len(candidates) < 2:
         return []
@@ -257,6 +264,46 @@ def _render_building_crops(
     return crops
 
 
+def _is_realistic_building_shape(poly: Dict[str, Any]) -> bool:
+    """Check if the polygon meets realistic shape proportions for a building footprint.
+    This prevents thin lines (aspect ratio > 5.5, width < 20 points, or compactness < 0.40)
+    from being classified as buildings.
+    """
+    sp = poly.get("shapely_poly")
+    if not sp or not sp.is_valid:
+        from shapely.geometry import Polygon as ShapelyPoly
+        try:
+            pts = poly.get("points", [])
+            if len(pts) < 3:
+                return False
+            sp = ShapelyPoly(pts)
+            if not sp.is_valid:
+                from shapely.validation import make_valid
+                sp = make_valid(sp)
+        except Exception:
+            return False
+
+    if not sp or sp.is_empty:
+        return False
+
+    try:
+        hull = sp.convex_hull
+        minr = sp.minimum_rotated_rectangle
+        coords = list(minr.exterior.coords)
+        if len(coords) < 3:
+            return False
+
+        w = math.dist(coords[0], coords[1])
+        h = math.dist(coords[1], coords[2])
+        aspect_ratio = max(w, h) / max(min(w, h), 0.001)
+        compactness = sp.area / max(hull.area, 0.001)
+        min_dim = min(w, h)
+
+        return aspect_ratio < 5.5 and compactness > 0.40 and min_dim >= 20.0
+    except Exception:
+        return False
+
+
 def _guess_category(poly: Dict[str, Any], page_area: float) -> str:
     """Rough initial guess for annotation colour coding."""
     area = poly.get("area", 0)
@@ -266,14 +313,17 @@ def _guess_category(poly: Dict[str, Any], page_area: float) -> str:
 
     if area_pct > 0.15 and not filled:
         return "boundary_candidate"
-    # Polygons from dashed-line reconstruction are almost always buildings
+    
+    # Check shape realism: if it fails, it cannot be a building
+    is_building = _is_realistic_building_shape(poly)
+
     if strategy in ("chain_join", "planar_face"):
-        return "building_candidate"
+        return "building_candidate" if is_building else "boundary_candidate"
     if area_pct > 0.04 and not filled:
         return "zone_candidate"
     if filled and area_pct > 0.005:
         return "zone_candidate"
-    return "building_candidate"
+    return "building_candidate" if is_building else "zone_candidate"
 
 
 def _build_prompt(polygons: List[Dict[str, Any]], page_area: float, n_crops: int = 0) -> str:
@@ -604,6 +654,15 @@ def classify_polygons_with_vision(
 
         log.info("[AI Vision] Applied %d classifications, %d artifacts, %d buildings",
                  applied, artifacts_removed, buildings_found)
+
+        # Post-classification cleanup of sub_zones
+        for poly in polygons:
+            if poly.get("_ai_zone_type") == "sub_zone":
+                if not _is_realistic_building_shape(poly):
+                    log.info("[AI Vision] Post-class cleanup: demoting narrow/spiky sub_zone to artifact")
+                    poly["_ai_zone_type"] = "artifact"
+                    poly["_is_artifact"] = True
+                    poly["_ai_reason"] = "post_class_cleanup: failed building shape metrics"
 
         # Clean up temp keys
         for poly in polygons:
